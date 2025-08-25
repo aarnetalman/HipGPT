@@ -1,5 +1,6 @@
 #include "gpt_model.h"
 #include "tokenizer.h"
+#include "hip_kernels.h" // ADDED: include for the sampling kernel
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -10,7 +11,7 @@
 #include <chrono>
 
 void print_usage(const char* prog_name) {
-    std::cout << "Usage: " << prog_name << " --prompt \"<text>\" [--num_tokens N] [--max_seq_len N] [--ckpt PATH] [--tokenizer PATH]" << std::endl;
+    std::cout << "Usage: " << prog_name << " --prompt \"<text>\" [--num_tokens N] [--max_seq_len N] [--ckpt PATH] [--tokenizer PATH] [--top_k N] [--temp F]" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -23,6 +24,8 @@ int main(int argc, char* argv[]) {
     int num_heads = 4;
     int ff_hidden_dim = 256;
     int num_layers = 2;
+    int top_k = 5; // ADDED: default top-k value
+    float temperature = 1.0f; // ADDED: default temperature value
 
     // Parse CLI arguments
     for (int i = 1; i < argc; ++i) {
@@ -37,6 +40,10 @@ int main(int argc, char* argv[]) {
             checkpoint_path = argv[++i];
         } else if (arg == "--tokenizer" && i + 1 < argc) {
             tokenizer_path = argv[++i];
+        } else if (arg == "--top_k" && i + 1 < argc) {
+            top_k = std::atoi(argv[++i]);
+        } else if (arg == "--temp" && i + 1 < argc) {
+            temperature = std::stof(argv[++i]);
         } else {
             print_usage(argv[0]);
             return 1;
@@ -68,30 +75,15 @@ int main(int argc, char* argv[]) {
     std::cout << "Prompt: " << prompt << std::endl;
     std::cout << "Generated: " << std::flush;
 
-    for (int step = 0; step < num_tokens; ++step) {
-        model.forward(d_input_ids, d_logits, 1, current_len);
+    // Call generate with the new parameters
+    std::vector<int> generated_ids = model.generate(input_ids, num_tokens_to_generate, top_k, temperature);
 
-        int next_token = launch_sample_from_logits(
-            d_logits + (current_len - 1) * vocab_size,
-            vocab_size
-        );
-
-        input_ids.push_back(next_token);
-        hipMemcpy(d_input_ids, input_ids.data(), (current_len + 1) * sizeof(int), hipMemcpyHostToDevice);
-        current_len++;
-
-        // Stream character-by-character
-        std::string token_str = tokenizer.decode({next_token});
-        for (char c : token_str) {
-            std::cout << c << std::flush;
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        }
-
-        if (next_token == tokenizer.eos_token_id()) {
-            break;
-        }
+    // Decode and stream the newly generated tokens
+    for (size_t i = input_ids.size(); i < generated_ids.size(); ++i) {
+        std::string token_str = tokenizer.decode({generated_ids[i]});
+        std::cout << token_str << std::flush;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-
 
     std::cout << std::endl;
     return 0;

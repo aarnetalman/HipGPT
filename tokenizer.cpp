@@ -1,4 +1,3 @@
-// tokenizer.cpp
 #include "tokenizer.h"
 #include <sstream>
 #include <set>
@@ -6,10 +5,10 @@
 #include <iostream>
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
-
 
 Tokenizer::Tokenizer(int vocab_limit) : vocab_limit_(vocab_limit) {}
 
@@ -18,73 +17,129 @@ std::vector<std::string> Tokenizer::split_word(const std::string& word) {
     for (char c : word) {
         tokens.push_back(std::string(1, c));
     }
-    tokens.back() += "</w>";
+    if (!tokens.empty()) {
+        tokens.back() += "</w>";
+    }
     return tokens;
 }
 
-std::pair<std::string, std::string> Tokenizer::find_best_pair(const std::map<std::vector<std::string>, int>& corpus) {
-    std::map<std::pair<std::string, std::string>, int> pairs;
-    for (const auto& [word, freq] : corpus) {
-        for (size_t i = 0; i + 1 < word.size(); ++i) {
-            pairs[{word[i], word[i + 1]}] += freq;
+// Helper to get pair frequencies from a tokenized corpus representation
+void get_pair_frequencies(const std::vector<std::vector<std::string>>& word_tokens, std::map<std::pair<std::string, std::string>, int>& pair_freq) {
+    pair_freq.clear();
+    for (const auto& tokens : word_tokens) {
+        for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+            pair_freq[{tokens[i], tokens[i+1]}]++;
         }
     }
-
-    std::pair<std::string, std::string> best_pair;
-    int max_freq = -1;
-    for (const auto& [pair, freq] : pairs) {
-        if (freq > max_freq) {
-            best_pair = pair;
-            max_freq = freq;
-        }
-    }
-    return best_pair;
 }
 
 void Tokenizer::train_bpe(const std::string& text) {
-    std::map<std::vector<std::string>, int> corpus;
     std::istringstream iss(text);
     std::string word;
 
-    // Initialize corpus with split characters
+    // 1. Initialize with character-level vocabulary and tokenize the corpus
+    std::set<char> char_vocab;
+    std::vector<std::vector<std::string>> word_tokens;
     while (iss >> word) {
-        corpus[split_word(word)]++;
+        for (char c : word) {
+            char_vocab.insert(c);
+        }
+        word_tokens.push_back(split_word(word));
     }
 
-    while ((int)token_to_stoi.size() < vocab_limit_) {
-        auto best_pair = find_best_pair(corpus);
+    for (char c : char_vocab) {
+        stoi_to_token.push_back(std::string(1, c));
+    }
+    // Add the special end-of-word character tokens
+    for (char c : char_vocab) {
+        stoi_to_token.push_back(std::string(1, c) + "</w>");
+    }
+    std::sort(stoi_to_token.begin(), stoi_to_token.end());
+    
+    // Assign initial IDs
+    for (size_t i = 0; i < stoi_to_token.size(); ++i) {
+        token_to_stoi[stoi_to_token[i]] = i;
+    }
+
+    // 2. Main BPE merge loop
+    while (vocab_size() < vocab_limit_) {
+        get_pair_frequencies(word_tokens, pair_freq);
+        if (pair_freq.empty()) break;
+
+        // Find the most frequent pair
+        auto best_pair = std::max_element(pair_freq.begin(), pair_freq.end(), 
+            [](const auto& a, const auto& b) { return a.second < b.second; })->first;
+        
+        // Add the new merged token to the vocabulary
         std::string merged = best_pair.first + best_pair.second;
+        if (token_to_stoi.count(merged)) continue; // Already exists
 
-        std::map<std::vector<std::string>, int> new_corpus;
+        token_to_stoi[merged] = vocab_size();
+        stoi_to_token.push_back(merged);
 
-        for (const auto& [word, freq] : corpus) {
-            std::vector<std::string> new_word;
-            for (size_t i = 0; i < word.size(); ++i) {
-                if (i < word.size() - 1 && word[i] == best_pair.first && word[i + 1] == best_pair.second) {
-                    new_word.push_back(merged);
-                    ++i;
+        std::cout << "Merging (" << best_pair.first << ", " << best_pair.second << ") -> " << merged << std::endl;
+
+        // 3. EFFICIENTLY update the tokenized corpus with the new merge
+        std::vector<std::vector<std::string>> new_word_tokens;
+        for (const auto& tokens : word_tokens) {
+            std::vector<std::string> new_tokens;
+            for (size_t i = 0; i < tokens.size(); ) {
+                if (i + 1 < tokens.size() && tokens[i] == best_pair.first && tokens[i+1] == best_pair.second) {
+                    new_tokens.push_back(merged);
+                    i += 2;
                 } else {
-                    new_word.push_back(word[i]);
+                    new_tokens.push_back(tokens[i]);
+                    i += 1;
                 }
             }
-            new_corpus[new_word] += freq;
+            new_word_tokens.push_back(new_tokens);
         }
-        corpus = std::move(new_corpus);
+        word_tokens = std::move(new_word_tokens);
     }
+    std::cout << "BPE training finished. Final vocab size: " << vocab_size() << std::endl;
+}
 
-    // Assign vocabulary
-    std::set<std::string> vocab_set;
-    for (const auto& [word, _] : corpus) {
-        for (const auto& token : word) {
-            vocab_set.insert(token);
+
+std::vector<std::string> Tokenizer::encode_word_as_tokens(const std::string& word) {
+    if (token_cache.count(word)) {
+        return token_cache[word];
+    }
+    
+    std::vector<std::string> tokens = split_word(word);
+    
+    while (tokens.size() > 1) {
+        std::pair<std::string, std::string> best_pair;
+        int best_rank = std::numeric_limits<int>::max();
+
+        // Find the merge with the highest priority (lowest rank/index in vocab)
+        for (size_t i = 0; i < tokens.size() - 1; ++i) {
+            std::string candidate = tokens[i] + tokens[i+1];
+            if (token_to_stoi.count(candidate) && token_to_stoi[candidate] < best_rank) {
+                best_rank = token_to_stoi[candidate];
+                best_pair = {tokens[i], tokens[i+1]};
+            }
         }
-    }
 
-    int idx = 0;
-    for (const auto& token : vocab_set) {
-        token_to_stoi[token] = idx++;
-        stoi_to_token.push_back(token);
+        if (best_rank == std::numeric_limits<int>::max()) {
+            break; // No more possible merges
+        }
+
+        // Apply the best merge found in this pass
+        std::vector<std::string> new_tokens;
+        for (size_t i = 0; i < tokens.size(); ) {
+            if (i + 1 < tokens.size() && tokens[i] == best_pair.first && tokens[i+1] == best_pair.second) {
+                new_tokens.push_back(best_pair.first + best_pair.second);
+                i += 2;
+            } else {
+                new_tokens.push_back(tokens[i]);
+                i += 1;
+            }
+        }
+        tokens = std::move(new_tokens);
     }
+    
+    token_cache[word] = tokens;
+    return tokens;
 }
 
 std::vector<int> Tokenizer::encode(const std::string& text) {
@@ -93,38 +148,26 @@ std::vector<int> Tokenizer::encode(const std::string& text) {
     std::vector<int> result;
 
     while (iss >> word) {
-        auto tokens = split_word(word);
-
-        while (tokens.size() > 1) {
-            bool merged = false;
-            for (size_t i = 0; i < tokens.size() - 1; ++i) {
-                std::string candidate = tokens[i] + tokens[i + 1];
-                if (token_to_stoi.count(candidate)) {
-                    tokens[i] = candidate;
-                    tokens.erase(tokens.begin() + i + 1);
-                    merged = true;
-                    break;
-                }
-            }
-            if (!merged) break;
-        }
-
+        auto tokens = encode_word_as_tokens(word);
         for (const auto& t : tokens) {
-            result.push_back(token_to_stoi.count(t) ? token_to_stoi[t] : 0);
+            if (token_to_stoi.count(t)) {
+                result.push_back(token_to_stoi[t]);
+            } // Note: Silently drop unknown tokens. Can be changed to a special <UNK> token.
         }
     }
-
     return result;
 }
 
 std::string Tokenizer::decode(const std::vector<int>& ids) {
     std::string out;
     for (int id : ids) {
+        if (id < 0 || id >= vocab_size()) continue; // Safety check
         std::string token = stoi_to_token[id];
         if (token.size() >= 4 && token.substr(token.size() - 4) == "</w>") {
-            token = token.substr(0, token.size() - 4) + " ";
+            out += token.substr(0, token.size() - 4) + " ";
+        } else {
+            out += token;
         }
-        out += token;
     }
     return out;
 }
@@ -134,17 +177,22 @@ void Tokenizer::save(const std::string& filepath) const {
     j["stoi_to_token"] = stoi_to_token;
 
     std::ofstream out(filepath);
-    out << j.dump(2);  // Pretty print with indent=2
+    out << j.dump(2);
 }
 
 void Tokenizer::load(const std::string& filepath) {
     std::ifstream in(filepath);
+    if (!in) {
+        std::cerr << "Error: Cannot open tokenizer file " << filepath << std::endl;
+        return;
+    }
     json j;
     in >> j;
 
     stoi_to_token = j["stoi_to_token"].get<std::vector<std::string>>();
     token_to_stoi.clear();
-    for (int i = 0; i < stoi_to_token.size(); ++i) {
+    for (size_t i = 0; i < stoi_to_token.size(); ++i) {
         token_to_stoi[stoi_to_token[i]] = i;
     }
+    token_cache.clear(); // Clear cache after loading a new vocab
 }

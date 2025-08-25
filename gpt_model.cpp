@@ -5,18 +5,40 @@
 #include <vector>
 #include <cstring>
 #include <fstream>
+#include <stdexcept>
 #include "hip_kernels.h"
-
+#include <iostream>
+#include <algorithm>
+#include <cmath>
+#include <thread>
+#include <chrono>
 
 GPTModel::GPTModel(int vocab_size, int max_seq_len, int embed_dim, int num_heads, int ff_hidden_dim, int num_layers)
-    : vocab_size_(vocab_size),
-      max_seq_len_(max_seq_len),
-      embed_dim_(embed_dim),
-      num_layers_(num_layers) {
+    : vocab_size_(vocab_size), max_seq_len_(max_seq_len), embed_dim_(embed_dim), num_layers_(num_layers) {
+
     allocate_embeddings();
-    allocate_output_projection();
     for (int i = 0; i < num_layers_; ++i) {
-        layers_.emplace_back(embed_dim_, num_heads, ff_hidden_dim);
+        layers_.push_back(new TransformerLayer(embed_dim, num_heads, ff_hidden_dim));
+    }
+    allocate_output_projection();
+}
+
+GPTModel::~GPTModel() {
+    if (d_token_embedding_) hipFree(d_token_embedding_);
+    if (d_pos_embedding_)   hipFree(d_pos_embedding_);
+    if (d_token_m_) hipFree(d_token_m_);
+    if (d_token_v_) hipFree(d_token_v_);
+    if (d_pos_m_)   hipFree(d_pos_m_);
+    if (d_pos_v_)   hipFree(d_pos_v_);
+    if (d_output_proj_)      hipFree(d_output_proj_);
+    if (d_output_proj_grad_) hipFree(d_output_proj_grad_);
+    if (d_output_m_) hipFree(d_output_m_);
+    if (d_output_v_) hipFree(d_output_v_);
+    if (d_embedded_input_) hipFree(d_embedded_input_);
+    if (d_layer_output_)   hipFree(d_layer_output_);
+
+    for (auto* layer : layers_) {
+        delete layer;
     }
 }
 
@@ -25,16 +47,23 @@ void GPTModel::allocate_embeddings() {
     int pos_embed_size = max_seq_len_ * embed_dim_;
 
     std::vector<float> token_host(token_embed_size);
-    std::vector<float> pos_host(pos_embed_size);
-
     for (auto& w : token_host) w = ((float)rand() / RAND_MAX - 0.5f) * 0.02f;
-    for (auto& w : pos_host) w = ((float)rand() / RAND_MAX - 0.5f) * 0.02f;
-
     hipMalloc(&d_token_embedding_, token_embed_size * sizeof(float));
-    hipMalloc(&d_pos_embedding_, pos_embed_size * sizeof(float));
-
     hipMemcpy(d_token_embedding_, token_host.data(), token_embed_size * sizeof(float), hipMemcpyHostToDevice);
+
+    std::vector<float> pos_host(pos_embed_size);
+    for (auto& w : pos_host) w = ((float)rand() / RAND_MAX - 0.5f) * 0.02f;
+    hipMalloc(&d_pos_embedding_, pos_embed_size * sizeof(float));
     hipMemcpy(d_pos_embedding_, pos_host.data(), pos_embed_size * sizeof(float), hipMemcpyHostToDevice);
+    
+    hipMalloc(&d_token_m_, token_embed_size * sizeof(float));
+    hipMalloc(&d_token_v_, token_embed_size * sizeof(float));
+    hipMalloc(&d_pos_m_, pos_embed_size * sizeof(float));
+    hipMalloc(&d_pos_v_, pos_embed_size * sizeof(float));
+    hipMemset(d_token_m_, 0, token_embed_size * sizeof(float));
+    hipMemset(d_token_v_, 0, token_embed_size * sizeof(float));
+    hipMemset(d_pos_m_, 0, pos_embed_size * sizeof(float));
+    hipMemset(d_pos_v_, 0, pos_embed_size * sizeof(float));
 }
 
 void GPTModel::allocate_output_projection() {
@@ -44,8 +73,13 @@ void GPTModel::allocate_output_projection() {
 
     hipMalloc(&d_output_proj_, proj_size * sizeof(float));
     hipMalloc(&d_output_proj_grad_, proj_size * sizeof(float));
+    hipMalloc(&d_output_m_, proj_size * sizeof(float));
+    hipMalloc(&d_output_v_, proj_size * sizeof(float));
 
     hipMemcpy(d_output_proj_, proj_host.data(), proj_size * sizeof(float), hipMemcpyHostToDevice);
+    hipMemset(d_output_proj_grad_, 0, proj_size * sizeof(float));
+    hipMemset(d_output_m_, 0, proj_size * sizeof(float));
+    hipMemset(d_output_v_, 0, proj_size * sizeof(float));
 }
 
 void GPTModel::forward(const int* d_input_ids, float* d_logits, int batch_size, int seq_len) {
@@ -54,12 +88,8 @@ void GPTModel::forward(const int* d_input_ids, float* d_logits, int batch_size, 
     hipMalloc(&d_embed_out, total_tokens * embed_dim_ * sizeof(float));
 
     launch_embedding_lookup(
-        d_input_ids,
-        d_token_embedding_,
-        d_pos_embedding_,
-        d_embed_out,
-        batch_size, seq_len,
-        vocab_size_, embed_dim_
+        d_input_ids, d_token_embedding_, d_pos_embedding_, d_embed_out,
+        batch_size, seq_len, vocab_size_, embed_dim_
     );
 
     float* d_temp;
@@ -67,18 +97,11 @@ void GPTModel::forward(const int* d_input_ids, float* d_logits, int batch_size, 
     float* d_input = d_embed_out;
 
     for (int i = 0; i < num_layers_; ++i) {
-        layers_[i].forward(d_input, d_temp, batch_size, seq_len);
+        layers_[i]->forward(d_input, d_temp, batch_size, seq_len);
         std::swap(d_input, d_temp);
     }
 
-    launch_matmul(
-        d_input,
-        d_output_proj_,
-        d_logits,
-        total_tokens,
-        embed_dim_,
-        vocab_size_
-    );
+    launch_matmul(d_input, d_output_proj_, d_logits, total_tokens, embed_dim_, vocab_size_);
 
     hipFree(d_embed_out);
     hipFree(d_temp);
@@ -86,129 +109,191 @@ void GPTModel::forward(const int* d_input_ids, float* d_logits, int batch_size, 
 
 void GPTModel::backward(const int* d_input_ids, const float* d_logits_grad, int batch_size, int seq_len, float learning_rate) {
     int total_tokens = batch_size * seq_len;
+    
+    // --- Recompute forward pass to get intermediate activations ---
     float* d_embed_out;
     hipMalloc(&d_embed_out, total_tokens * embed_dim_ * sizeof(float));
-
     launch_embedding_lookup(
-        d_input_ids,
-        d_token_embedding_,
-        d_pos_embedding_,
-        d_embed_out,
-        batch_size, seq_len,
-        vocab_size_, embed_dim_
+        d_input_ids, d_token_embedding_, d_pos_embedding_, d_embed_out,
+        batch_size, seq_len, vocab_size_, embed_dim_
     );
 
-    std::vector<float*> layer_inputs(num_layers_ + 1);
-    layer_inputs[0] = d_embed_out;
+    std::vector<float*> layer_inputs;
+    layer_inputs.push_back(d_embed_out);
 
     float* d_temp;
     hipMalloc(&d_temp, total_tokens * embed_dim_ * sizeof(float));
     float* d_input = d_embed_out;
 
     for (int i = 0; i < num_layers_; ++i) {
-        layers_[i].forward(d_input, d_temp, batch_size, seq_len);
+        layers_[i]->forward(d_input, d_temp, batch_size, seq_len);
         std::swap(d_input, d_temp);
-        layer_inputs[i + 1] = d_input;
+        // Note: after swap, d_input points to the *output* of the layer
+        layer_inputs.push_back(d_input); 
     }
 
-    // Compute output projection gradient
-    launch_matmul(
-        layer_inputs.back(),         // [B*S, E]
-        d_logits_grad,               // [B*S, V]
-        d_output_proj_grad_,         // [E, V]
-        embed_dim_,
-        total_tokens,
-        vocab_size_
-    );
-
-    // SGD update for final projection
-    launch_sgd_update(d_output_proj_, d_output_proj_grad_, learning_rate, embed_dim_ * vocab_size_);
-
-    // Compute gradient w.r.t. last layer output
+    // --- Start Backpropagation ---
     float* d_last_grad;
     hipMalloc(&d_last_grad, total_tokens * embed_dim_ * sizeof(float));
-
-    launch_matmul(
-        d_logits_grad,               // [B*S, V]
-        d_output_proj_,              // [V, E]
-        d_last_grad,                 // [B*S, E]
-        total_tokens,
-        vocab_size_,
-        embed_dim_
+    
+    // **FIXED**: Compute grad w.r.t. last layer output: d_logits_grad @ d_output_proj^T
+    // Requires a kernel for A @ B^T
+    launch_matmul_transpose_B(
+        d_logits_grad,      // [B*S, V]
+        d_output_proj_,     // [E, V] but used as [V, E]
+        d_last_grad,        // [B*S, E]
+        total_tokens, vocab_size_, embed_dim_
     );
 
+    // **FIXED**: Compute output projection gradient: (last_layer_output)^T @ d_logits_grad
+    // Requires a kernel for A^T @ B
+    launch_matmul_transpose_A(
+        layer_inputs.back(),    // [B*S, E] but used as [E, B*S]
+        d_logits_grad,          // [B*S, V]
+        d_output_proj_grad_,    // [E, V]
+        total_tokens, embed_dim_, vocab_size_
+    );
+
+    launch_adam_update(
+        d_output_proj_, d_output_proj_grad_, d_output_m_, d_output_v_,
+        learning_rate, 0.9f, 0.999f, 1e-8f, 1, // Step `t` should be tracked
+        embed_dim_ * vocab_size_
+    );
+    
     // Backprop through layers in reverse
     for (int i = num_layers_ - 1; i >= 0; --i) {
-        layers_[i].backward(layer_inputs[i], d_last_grad, batch_size, seq_len, learning_rate);
+        // The gradient flowing into layer `i` is d_last_grad.
+        // The input to layer `i` was layer_inputs[i].
+        // The gradient computed by this call (the new d_last_grad) will be the grad w.r.t layer_inputs[i].
+        layers_[i]->backward(layer_inputs[i], d_last_grad, d_last_grad, batch_size, seq_len, learning_rate);
     }
+    
+    // TODO: Add backward pass for embeddings and update them with Adam.
 
+    // Cleanup
+    for(size_t i = 1; i < layer_inputs.size(); ++i) {
+        // d_embed_out is freed separately, layer_inputs[0]
+        if (layer_inputs[i] != d_embed_out) hipFree(layer_inputs[i]);
+    }
     hipFree(d_embed_out);
     hipFree(d_temp);
     hipFree(d_last_grad);
 }
 
-void GPTModel::save_checkpoint(const std::string& path) {
-    std::ofstream out(path, std::ios::binary);
-    if (!out) {
-        std::cerr << "Failed to open checkpoint file: " << path << std::endl;
-        return;
-    }
-
-    // Helper lambda to dump weights
-    auto dump = [&](float* device_ptr, size_t count) {
-        std::vector<float> buffer(count);
-        hipMemcpy(buffer.data(), device_ptr, count * sizeof(float), hipMemcpyDeviceToHost);
-        out.write(reinterpret_cast<const char*>(buffer.data()), count * sizeof(float));
-    };
-
-    // Save embeddings
-    dump(d_token_embedding_, vocab_size_ * embed_dim_);
-    dump(d_pos_embedding_, max_seq_len_ * embed_dim_);
-
-    // Save output projection
-    dump(d_output_proj_, embed_dim_ * vocab_size_);
-
-    // Save each transformer's weights
-    for (auto* layer : layers_) {
-        dump(layer->d_qkv_weight_, 3 * embed_dim_ * embed_dim_);
-        dump(layer->d_ff1_weight_, embed_dim_ * layer->ff_hidden_dim_);
-        dump(layer->d_ff2_weight_, layer->ff_hidden_dim_ * embed_dim_);
-    }
-
-    out.close();
-    std::cout << "Checkpoint saved to " << path << std::endl;
-}
-std::vector<int> GPTModel::generate(const std::vector<int>& prompt_ids, int max_new_tokens) {
+std::vector<int> GPTModel::generate(const std::vector<int>& prompt_ids, int max_new_tokens, int top_k, float temperature) {
     std::vector<int> output = prompt_ids;
-
-    int vocab_size = vocab_size_;
-    int embed_dim = embed_dim_;
 
     int* d_input_ids;
     float* d_logits;
-
+    int* d_next_token;
     hipMalloc(&d_input_ids, max_seq_len_ * sizeof(int));
-    hipMalloc(&d_logits, max_seq_len_ * vocab_size * sizeof(float));
+    hipMalloc(&d_logits, max_seq_len_ * vocab_size_ * sizeof(float));
+    hipMalloc(&d_next_token, sizeof(int));
 
     for (int step = 0; step < max_new_tokens; ++step) {
+        // Inefficient: Re-copies the entire context every time.
+        // A better approach uses a KV cache on the GPU.
         int cur_len = std::min((int)output.size(), max_seq_len_);
-        std::vector<int> input_ids(max_seq_len_, 0);
-        std::copy(output.end() - cur_len, output.end(), input_ids.end() - cur_len);
+        std::vector<int> input_ids(max_seq_len_, 0); // Pad with 0
+        std::copy(output.end() - cur_len, output.end(), input_ids.begin() + (max_seq_len_ - cur_len));
 
         hipMemcpy(d_input_ids, input_ids.data(), max_seq_len_ * sizeof(int), hipMemcpyHostToDevice);
 
         forward(d_input_ids, d_logits, 1, max_seq_len_);
 
-        std::vector<float> h_logits(vocab_size);
-        hipMemcpy(h_logits.data(), &d_logits[(max_seq_len_ - 1) * vocab_size], vocab_size * sizeof(float), hipMemcpyDeviceToHost);
-
-        // Argmax
-        int max_idx = std::max_element(h_logits.begin(), h_logits.end()) - h_logits.begin();
-        output.push_back(max_idx);
+        launch_sample_from_logits(
+            &d_logits[(max_seq_len_ - 1) * vocab_size_], // Logits for the last token
+            d_next_token,
+            vocab_size_,
+            top_k,
+            temperature
+        );
+        
+        int next_token;
+        hipMemcpy(&next_token, d_next_token, sizeof(int), hipMemcpyDeviceToHost);
+        output.push_back(next_token);
     }
 
     hipFree(d_input_ids);
     hipFree(d_logits);
+    hipFree(d_next_token);
 
     return output;
+}
+
+// Save: model config + embeddings + each layer + output projection
+void GPTModel::save_checkpoint(const std::string& path) const {
+    std::ofstream os(path, std::ios::binary);
+    if (!os) {
+        throw std::runtime_error("save_checkpoint: cannot open " + path);
+    }
+
+    // ---- Header / config ----
+    os.write(reinterpret_cast<const char*>(&vocab_size_), sizeof(vocab_size_));
+    os.write(reinterpret_cast<const char*>(&max_seq_len_), sizeof(max_seq_len_));
+    os.write(reinterpret_cast<const char*>(&embed_dim_), sizeof(embed_dim_));
+    os.write(reinterpret_cast<const char*>(&num_layers_), sizeof(num_layers_));
+
+    // ---- Embeddings ----
+    {
+        std::vector<float> h_tok(vocab_size_ * embed_dim_);
+        std::vector<float> h_pos(max_seq_len_ * embed_dim_);
+        hipMemcpy(h_tok.data(), d_token_embedding_, h_tok.size() * sizeof(float), hipMemcpyDeviceToHost);
+        hipMemcpy(h_pos.data(), d_pos_embedding_, h_pos.size() * sizeof(float), hipMemcpyDeviceToHost);
+
+        os.write(reinterpret_cast<const char*>(h_tok.data()), h_tok.size() * sizeof(float));
+        os.write(reinterpret_cast<const char*>(h_pos.data()), h_pos.size() * sizeof(float));
+    }
+
+    // ---- Layers ----
+    for (int i = 0; i < num_layers_; ++i) {
+        layers_[i]->save(os);
+    }
+
+    // ---- Output projection ----
+    {
+        std::vector<float> h_proj(embed_dim_ * vocab_size_);
+        hipMemcpy(h_proj.data(), d_output_proj_, h_proj.size() * sizeof(float), hipMemcpyDeviceToHost);
+        os.write(reinterpret_cast<const char*>(h_proj.data()), h_proj.size() * sizeof(float));
+    }
+}
+
+// Load: model config must match current ctor args (we validate)
+void GPTModel::load_checkpoint(const std::string& path) {
+    std::ifstream is(path, std::ios::binary);
+    if (!is) {
+        throw std::runtime_error("load_checkpoint: cannot open " + path);
+    }
+
+    int v = 0, s = 0, e = 0, L = 0;
+    is.read(reinterpret_cast<char*>(&v), sizeof(v));
+    is.read(reinterpret_cast<char*>(&s), sizeof(s));
+    is.read(reinterpret_cast<char*>(&e), sizeof(e));
+    is.read(reinterpret_cast<char*>(&L), sizeof(L));
+
+    if (v != vocab_size_ || s != max_seq_len_ || e != embed_dim_ || L != num_layers_) {
+        throw std::runtime_error("load_checkpoint: model hyperparameters mismatch");
+    }
+
+    // ---- Embeddings ----
+    {
+        std::vector<float> h_tok(vocab_size_ * embed_dim_);
+        std::vector<float> h_pos(max_seq_len_ * embed_dim_);
+        is.read(reinterpret_cast<char*>(h_tok.data()), h_tok.size() * sizeof(float));
+        is.read(reinterpret_cast<char*>(h_pos.data()), h_pos.size() * sizeof(float));
+        hipMemcpy(d_token_embedding_, h_tok.data(), h_tok.size() * sizeof(float), hipMemcpyHostToDevice);
+        hipMemcpy(d_pos_embedding_,  h_pos.data(), h_pos.size()  * sizeof(float), hipMemcpyHostToDevice);
+    }
+
+    // ---- Layers ----
+    for (int i = 0; i < num_layers_; ++i) {
+        layers_[i]->load(is);
+    }
+
+    // ---- Output projection ----
+    {
+        std::vector<float> h_proj(embed_dim_ * vocab_size_);
+        is.read(reinterpret_cast<char*>(h_proj.data()), h_proj.size() * sizeof(float));
+        hipMemcpy(d_output_proj_, h_proj.data(), h_proj.size() * sizeof(float), hipMemcpyHostToDevice);
+    }
 }

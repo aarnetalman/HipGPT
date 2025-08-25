@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <map>
+#include <utility>
 
 class Tokenizer {
 public:
@@ -23,10 +25,12 @@ private:
     std::unordered_map<std::string, int> token_to_stoi;
     std::vector<std::string> stoi_to_token;
 
-    std::unordered_map<std::pair<std::string, std::string>, int, boost::hash<std::pair<std::string, std::string>>> pair_freq;
+    // For tracking frequency of token pairs during training
+    std::map<std::pair<std::string, std::string>, int> pair_freq;
+
+    // For caching word-to-token mappings to speed up encoding
     std::unordered_map<std::string, std::vector<std::string>> token_cache;
 
     std::vector<std::string> split_word(const std::string& word);
-    void learn_bpe();
-    std::string join_tokens(const std::vector<std::string>& tokens);
+    std::vector<std::string> encode_word_as_tokens(const std::string& word);
 };

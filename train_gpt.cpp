@@ -37,22 +37,27 @@ int main(int argc, char** argv) {
     int num_steps = args.count("--steps") ? std::stoi(args["--steps"]) : 10;
     float learning_rate = args.count("--lr") ? std::stof(args["--lr"]) : 1e-2f;
 
+    // File paths from CLI or defaults
+    std::string data_path = args.count("--data_path") ? args["--data_path"] : "data.txt";
+    std::string tokenizer_path = args.count("--tokenizer_path") ? args["--tokenizer_path"] : "tokenizer.json";
+    std::string tokens_path = args.count("--tokens_path") ? args["--tokens_path"] : "tokens.bin";
     bool force_reset = args.count("--reset");
 
     // ---- Tokenizer + Dataset ----
-    Tokenizer tokenizer;
+    Tokenizer tokenizer(5000);
+
     std::vector<int> tokens;
 
-    if (!force_reset && std::filesystem::exists("tokenizer.json") && std::filesystem::exists("tokens.bin")) {
-        tokenizer.load("tokenizer.json");
-        std::ifstream in("tokens.bin", std::ios::binary);
+    if (!force_reset && std::filesystem::exists(tokenizer_path) && std::filesystem::exists(tokens_path)) {
+        tokenizer.load(tokenizer_path);
+        std::ifstream in(tokens_path, std::ios::binary);
         int id;
         while (in.read(reinterpret_cast<char*>(&id), sizeof(int))) {
             tokens.push_back(id);
         }
         std::cout << "Loaded tokenizer and tokenized dataset (" << tokens.size() << " tokens)\n";
     } else {
-        std::ifstream file("data.txt");
+        std::ifstream file(data_path);
         if (!file) {
             std::cerr << "Error: data.txt not found.\n";
             return 1;
@@ -61,18 +66,18 @@ int main(int argc, char** argv) {
         buffer << file.rdbuf();
         std::string text = buffer.str();
 
-        tokenizer.train_bpe(text, 5000);
-        tokenizer.save("tokenizer.json");
+        tokenizer.train_bpe(text);
+        tokenizer.save(tokenizer_path);
         tokens = tokenizer.encode(text);
 
-        std::ofstream out("tokens.bin", std::ios::binary);
+        std::ofstream out(tokens_path, std::ios::binary);
         for (int id : tokens) {
             out.write(reinterpret_cast<const char*>(&id), sizeof(int));
         }
         std::cout << "Trained tokenizer and saved " << tokens.size() << " tokens\n";
     }
 
-    int vocab_size = tokenizer.vocab_size(); 
+    int vocab_size = tokenizer.vocab_size();
     int total_tokens_per_batch = batch_size * max_seq_len;
 
     std::cout << "Using vocab size: " << vocab_size << std::endl;

@@ -1,15 +1,13 @@
 #!/bin/bash
 
-# Go to script directory
-cd "$(dirname "$0")" || exit
+set -e
 
-# Go to project root
-cd .. || exit
+# Use a more robust way to get to the project root
+PROJECT_ROOT="$(dirname "$(dirname "$(readlink -f "$0")")")"
+DATA_DIR="$PROJECT_ROOT/data"
 
-# Create and enter data directory
-mkdir -p data
-cd data || exit
-
+mkdir -p "$DATA_DIR"
+cd "$DATA_DIR" || exit
 
 # URLs
 BASE_URL="https://huggingface.co/datasets/wikitext/resolve/main/wikitext-2-raw-v1"
@@ -21,10 +19,15 @@ for file in "${FILES[@]}"; do
         echo "$file already exists, skipping."
     else
         echo "Downloading $file..."
-        wget "$BASE_URL/$file"
+        wget -nc "$BASE_URL/$file"
     fi
 done
 
-echo "Combining into data.txt..."
-cat wiki.train.raw > data.txt
-echo "Done. Created data.txt with training text."
+DATA_FILE="data.txt"
+if [[ -f "$DATA_FILE" ]]; then
+    echo "$DATA_FILE already exists, skipping concatenation."
+else
+    echo "Combining into data.txt..."
+    cat wiki.train.raw wiki.valid.raw wiki.test.raw > "$DATA_FILE"
+    echo "Done. Created data.txt with all raw data."
+fi
