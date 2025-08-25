@@ -207,13 +207,17 @@ int main(int argc, char** argv) {
     model.save_checkpoint("gpt_checkpoint.bin");
     std::cout << "Checkpoint saved successfully." << std::endl;
 
+    // --- Ensure all GPU work is complete before freeing ---
+    std::cout << "Synchronizing device before cleanup..." << std::endl;
+    hipDeviceSynchronize();
 
-    // ---- Cleanup ----
+    std::cout << "Freeing device buffers..." << std::endl;
     hipFree(d_logits);
     hipFree(d_input_ids);
     hipFree(d_labels);
     hipFree(d_softmax_out);
     hipFree(d_loss_grad);
+    std::cout << "Device buffers freed." << std::endl;
 
     return 0;
 }
