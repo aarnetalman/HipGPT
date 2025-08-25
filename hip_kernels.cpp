@@ -200,3 +200,113 @@ void launch_embedding_lookup(
         batch_size, seq_len, vocab_size, embed_dim
     );
 }
+
+// ---------------- Softmax + Cross-Entropy Loss ----------------
+__global__ void softmax_loss_kernel(
+    const float* logits,
+    float* softmax_out,
+    const int* labels,
+    float* grad_out,
+    float* loss_sum,
+    int N, int V
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+
+    // Find max for numerical stability
+    float max_logit = -1e9f;
+    for (int i = 0; i < V; ++i) {
+        float val = logits[idx * V + i];
+        if (val > max_logit) max_logit = val;
+    }
+
+    // Compute softmax and cross-entropy
+    float sum_exp = 0.0f;
+    for (int i = 0; i < V; ++i) {
+        softmax_out[idx * V + i] = expf(logits[idx * V + i] - max_logit);
+        sum_exp += softmax_out[idx * V + i];
+    }
+
+    float log_sum = logf(sum_exp);
+    int label = labels[idx];
+    float log_prob = logits[idx * V + label] - max_logit - log_sum;
+
+    atomicAdd(loss_sum, -log_prob);  // accumulate negative log likelihood
+
+    // Compute gradient: softmax - one-hot(label)
+    for (int i = 0; i < V; ++i) {
+        float prob = softmax_out[idx * V + i] / sum_exp;
+        softmax_out[idx * V + i] = prob;
+        grad_out[idx * V + i] = prob - (i == label ? 1.0f : 0.0f);
+    }
+}
+
+float launch_softmax_loss(
+    const float* logits,
+    float* softmax_out,
+    const int* labels,
+    float* grad_out,
+    int B, int C
+) {
+    int N = B;  // B = batch_size * seq_len
+    int V = C;  // C = vocab_size
+
+    float* d_loss_sum;
+    hipMalloc(&d_loss_sum, sizeof(float));
+    hipMemset(d_loss_sum, 0, sizeof(float));
+
+    int threads = 256;
+    int blocks = (N + threads - 1) / threads;
+
+    hipLaunchKernelGGL(
+        softmax_loss_kernel,
+        dim3(blocks), dim3(threads), 0, 0,
+        logits,
+        softmax_out,
+        labels,
+        grad_out,
+        d_loss_sum,
+        N, V
+    );
+
+    float loss;
+    hipMemcpy(&loss, d_loss_sum, sizeof(float), hipMemcpyDeviceToHost);
+    hipFree(d_loss_sum);
+
+    return loss / N;  // return average loss
+}
+
+__global__ void accuracy_kernel(const float* softmax, const int* labels, int* correct, int N, int V) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+
+    const float* row = softmax + idx * V;
+    int pred = 0;
+    float max_val = row[0];
+    for (int i = 1; i < V; ++i) {
+        if (row[i] > max_val) {
+            max_val = row[i];
+            pred = i;
+        }
+    }
+
+    if (pred == labels[idx]) atomicAdd(correct, 1);
+}
+
+float launch_accuracy(const float* d_softmax, const int* d_labels, int total_tokens, int vocab_size) {
+    int threads = 256;
+    int blocks = (total_tokens + threads - 1) / threads;
+
+    int* d_correct;
+    hipMalloc(&d_correct, sizeof(int));
+    hipMemset(d_correct, 0, sizeof(int));
+
+    hipLaunchKernelGGL(accuracy_kernel, dim3(blocks), dim3(threads), 0, 0,
+                       d_softmax, d_labels, d_correct, total_tokens, vocab_size);
+
+    int h_correct = 0;
+    hipMemcpy(&h_correct, d_correct, sizeof(int), hipMemcpyDeviceToHost);
+    hipFree(d_correct);
+
+    return static_cast<float>(h_correct) / total_tokens;
+}

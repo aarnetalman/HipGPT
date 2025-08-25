@@ -45,3 +45,5 @@ void launch_attention_weighted_sum(
     float* output,
     int total_tokens, int seq_len, int head_dim
 );
+
+float launch_accuracy(const float* d_softmax, const int* d_labels, int total_tokens, int vocab_size);
