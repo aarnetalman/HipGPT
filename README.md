@@ -42,8 +42,8 @@ cd HipGPT
 The project includes a convenient script to download the WikiText-2 dataset and prepare it for training.
 
 ```bash
-chmod +x scripts/download_wikitext.sh
-./scripts/download_wikitext.sh
+chmod +x scripts/download_data.sh
+./scripts/download_data.sh
 ```
 
 This will create a `data/` directory and place a `data.txt` file inside it.
