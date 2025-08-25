@@ -232,12 +232,12 @@ void TransformerLayer::backward(const float* d_input, const float* d_grad_output
     
     // Backprop: FFN(LayerNorm(residual_input))
     // Backprop through FF2
-    launch_matmul_backward_bias(d_ff1_output_, d_ffn_path_grad, d_ff2_grad_weight_, ff_hidden_dim_, total_tokens, embed_dim_, d_ff2_grad_bias_);
+    launch_matmul_backward_bias(d_ff1_output_, d_ffn_path_grad, d_ff2_grad_weight_, d_ff2_grad_bias_, total_tokens, embed_dim_, ff_hidden_dim_);
     launch_matmul(d_ffn_path_grad, d_ff2_weight_, d_ff1_grad_output_, total_tokens, embed_dim_, ff_hidden_dim_);
     // Backprop through ReLU
     launch_backprop_activation(d_ff1_output_, d_ff1_grad_output_, d_ff1_grad_output_, total_tokens * ff_hidden_dim_);
     // Backprop through FF1
-    launch_matmul_backward_bias(d_residual_input_, d_ff1_grad_output_, d_ff1_grad_weight_, embed_dim_, total_tokens, ff_hidden_dim_, d_ff1_grad_bias_);
+    launch_matmul_backward_bias(d_residual_input_, d_ff1_grad_output_, d_ff1_grad_weight_, d_ff1_grad_bias_, total_tokens, ff_hidden_dim_, embed_dim_);
     launch_matmul(d_ff1_grad_output_, d_ff1_weight_, d_ffn_path_grad, total_tokens, ff_hidden_dim_, embed_dim_);
     
     // Backprop through LayerNorm
@@ -258,7 +258,7 @@ void TransformerLayer::backward(const float* d_input, const float* d_grad_output
     // Backprop through Attention...
     // Note: A full attention backward is very complex. This is a simplified backprop through the linear layers.
     // Backprop through W_o
-    launch_matmul_backward_bias(d_attn_output_, d_attn_path_grad, d_qkv_grad_weight_ + 2 * embed_dim_ * embed_dim_, embed_dim_, total_tokens, embed_dim_, d_qkv_grad_bias_ + 2 * embed_dim_);
+    launch_matmul_backward_bias(d_attn_output_, d_attn_path_grad, d_qkv_grad_weight_ + 2 * embed_dim_ * embed_dim_, d_qkv_grad_bias_ + 2 * embed_dim_, total_tokens, embed_dim_, embed_dim_);
     launch_matmul(d_attn_path_grad, d_qkv_weight_ + 2 * embed_dim_ * embed_dim_, d_qkv_grad_input_, total_tokens, embed_dim_, embed_dim_);
     // (Skipping backprop through attention mechanism itself and QKV projections for brevity)
 
