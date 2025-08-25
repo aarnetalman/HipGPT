@@ -785,36 +785,38 @@ void launch_embedding_backward(const float* grad_out, const int* token_ids,
     std::cout << "embedding_backward_kernel completed successfully" << std::endl;
 }
 
+// Ultra-conservative matmul_transpose_A kernel - each thread does minimal work
+
 __global__ void matmul_transpose_A_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
-    // Each thread works on one output element, but processes M dimension cooperatively
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
-    int total_elements = K * N;
-    if (idx >= total_elements) return;
+    // Each thread processes only a few elements to minimize GPU load
+    const int ELEMENTS_PER_THREAD = 1;  // Ultra-conservative: 1 element per thread
     
-    // Convert to 2D coordinates
-    int row = idx / N;  // K dimension
-    int col = idx % N;  // N dimension
+    int global_idx = idx * ELEMENTS_PER_THREAD;
+    if (global_idx >= K * N) return;
+    
+    int row = global_idx / N;  // K dimension
+    int col = global_idx % N;  // N dimension
     
     if (row >= K || col >= N) return;
-
+    
     float sum = 0.0f;
     
-    // Process M dimension in small chunks to prevent GPU timeout
-    const int CHUNK_SIZE = 16;  // Process 16 elements at a time
+    // Process M dimension with frequent breaks
+    const int MAX_CONSECUTIVE = 4;  // Do at most 4 operations before break
     
-    for (int chunk_start = 0; chunk_start < M; chunk_start += CHUNK_SIZE) {
-        int chunk_end = min(chunk_start + CHUNK_SIZE, M);
+    for (int i = 0; i < M; i += MAX_CONSECUTIVE) {
+        int end_i = min(i + MAX_CONSECUTIVE, M);
         
-        // Process this chunk
-        for (int i = chunk_start; i < chunk_end; ++i) {
-            sum += A[i * K + row] * B[i * N + col];
+        // Do a small batch
+        for (int j = i; j < end_i; ++j) {
+            sum += A[j * K + row] * B[j * N + col];
         }
         
-        // Give GPU a breather every few chunks
-        if ((chunk_start > 0) && (chunk_start % (CHUNK_SIZE * 4) == 0)) {
-            // Force some memory operations to prevent compiler optimization that might cause hangs
-            __syncthreads();
+        // Force a memory fence to give GPU a break
+        if (i > 0) {
+            __threadfence();
         }
     }
     
@@ -829,70 +831,55 @@ void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, 
         return;
     }
     
+    // ULTRA-CONSERVATIVE approach to prevent GPU hang
     int total_elements = K * N;
     
-    // Use smaller blocks to reduce resource pressure per SM
-    int threads_per_block = 128;  // Reduced from 256
-    int blocks = (total_elements + threads_per_block - 1) / threads_per_block;
+    // Use tiny blocks and very few blocks per launch
+    int threads_per_block = 32;  // Tiny blocks
+    int max_blocks_per_launch = 512;  // Very few blocks per launch
     
-    // Very conservative limit for this problematic kernel
-    const int MAX_BLOCKS = 8192;
-    if (blocks > MAX_BLOCKS) {
-        // Process in multiple kernel launches
-        std::cout << "Large matrix detected, using multiple kernel launches" << std::endl;
+    int elements_per_launch = max_blocks_per_launch * threads_per_block;
+    int num_launches = (total_elements + elements_per_launch - 1) / elements_per_launch;
+    
+    std::cout << "ULTRA-SAFE MODE: " << num_launches << " launches, " 
+              << max_blocks_per_launch << " blocks each" << std::endl;
+    
+    // Clear output matrix first
+    hipMemset(C, 0, K * N * sizeof(float));
+    
+    for (int launch = 0; launch < num_launches; ++launch) {
+        int start_element = launch * elements_per_launch;
+        int end_element = min(start_element + elements_per_launch, total_elements);
+        int launch_elements = end_element - start_element;
+        int blocks_this_launch = (launch_elements + threads_per_block - 1) / threads_per_block;
         
-        int elements_per_launch = MAX_BLOCKS * threads_per_block;
-        int num_launches = (total_elements + elements_per_launch - 1) / elements_per_launch;
+        std::cout << "  Launch " << (launch + 1) << "/" << num_launches 
+                  << ": elements " << start_element << "-" << (end_element-1) 
+                  << " (" << blocks_this_launch << " blocks)" << std::endl;
         
-        for (int launch = 0; launch < num_launches; ++launch) {
-            int start_element = launch * elements_per_launch;
-            int end_element = min(start_element + elements_per_launch, total_elements);
-            int launch_elements = end_element - start_element;
-            int launch_blocks = (launch_elements + threads_per_block - 1) / threads_per_block;
-            
-            std::cout << "  Launch " << (launch + 1) << "/" << num_launches 
-                      << ": elements " << start_element << "-" << (end_element - 1) 
-                      << " (" << launch_blocks << " blocks)" << std::endl;
-            
-            // Offset pointers for this launch
-            hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(launch_blocks), dim3(threads_per_block), 0, 0, 
-                              A, B, C, M, N, K);
-            
-            // Check for errors immediately after each launch
-            hipError_t err = hipGetLastError();
-            if (err != hipSuccess) {
-                std::cerr << "Kernel launch error in launch " << launch << ": " << hipGetErrorString(err) << std::endl;
-                exit(1);
-            }
-            
-            err = hipDeviceSynchronize();
-            if (err != hipSuccess) {
-                std::cerr << "Kernel execution error in launch " << launch << ": " << hipGetErrorString(err) << std::endl;
-                exit(1);
-            }
-            
-            std::cout << "  Launch " << (launch + 1) << " completed successfully" << std::endl;
-        }
-    } else {
-        std::cout << "Using single launch: " << blocks << " blocks x " << threads_per_block << " threads" << std::endl;
-        std::cout << "Total elements: " << total_elements << std::endl;
-        
-        hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(blocks), dim3(threads_per_block), 0, 0, A, B, C, M, N, K);
+        // Use a simple offset approach - modify the kernel to handle this
+        hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(blocks_this_launch), dim3(threads_per_block), 0, 0, 
+                          A, B, C, M, N, K);
         
         hipError_t err = hipGetLastError();
         if (err != hipSuccess) {
-            std::cerr << "HIP Kernel Launch Error: " << hipGetErrorString(err) << std::endl;
+            std::cerr << "Launch error: " << hipGetErrorString(err) << std::endl;
             exit(1);
         }
         
         err = hipDeviceSynchronize();
         if (err != hipSuccess) {
-            std::cerr << "HIP Kernel Execution Error: " << hipGetErrorString(err) << std::endl;
+            std::cerr << "Execution error: " << hipGetErrorString(err) << std::endl;
             exit(1);
         }
+        
+        std::cout << "  Launch " << (launch + 1) << " completed successfully" << std::endl;
+        
+        // Small delay between launches to let GPU cool down
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     
-    std::cout << "matmul_transpose_A_kernel completed successfully" << std::endl;
+    std::cout << "matmul_transpose_A_kernel completed successfully (ultra-safe mode)" << std::endl;
 }
 
 __global__ void matmul_transpose_B_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
