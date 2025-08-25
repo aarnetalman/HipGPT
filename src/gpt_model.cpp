@@ -117,7 +117,7 @@ void GPTModel::backward(const int* d_input_ids, const float* d_logits_grad, int 
         batch_size, seq_len, vocab_size_, embed_dim_
     );
 
-    std::vector<const float*> layer_inputs; // Use const float* as we don't modify them
+    std::vector<const float*> layer_inputs;
     layer_inputs.push_back(d_embed_out);
 
     float* d_temp;
@@ -183,7 +183,6 @@ void GPTModel::backward(const int* d_input_ids, const float* d_logits_grad, int 
         max_seq_len_ * embed_dim_
     );
 
-    // --- Cleanup ---
     hipFree(d_embed_out);
     hipFree(d_temp);
     hipFree(d_last_grad);
