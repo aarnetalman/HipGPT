@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(HIP_GPT LANGUAGES CXX HIP)
+project(HipGPT LANGUAGES CXX HIP)
 
 # --- Dependency Management ---
 include(FetchContent)
