@@ -145,6 +145,11 @@ int main(int argc, char** argv) {
                     << " | Accuracy: " << acc * 100.0f << "%"
                     << " | Time: " << ms << " ms" << std::endl;
         }
+        if ((step % 500) == 0 && step > 0) {
+            std::stringstream fname;
+            fname << "gpt_checkpoint_step" << step << ".bin";
+            model.save_checkpoint(fname.str());
+        }
 
     }
 
