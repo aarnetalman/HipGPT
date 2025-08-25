@@ -9,6 +9,41 @@
 #include <sstream>
 #include <unordered_map>
 #include <filesystem>
+#include <regex>
+#include <algorithm>
+#include <string>
+
+
+// keep only the newest `keep_last` step-checkpoints; don't touch gpt_checkpoint.bin
+void prune_old_checkpoints(const std::string& dir, const std::string& prefix, int keep_last) {
+    namespace fs = std::filesystem;
+    std::vector<std::pair<fs::file_time_type, fs::path>> step_ckpts;
+
+    std::regex pat("^" + prefix + R"(_step[0-9]+\.bin$)");
+
+    for (auto& p : fs::directory_iterator(dir)) {
+        if (!p.is_regular_file()) continue;
+        const std::string name = p.path().filename().string();
+        if (std::regex_match(name, pat)) {
+            step_ckpts.emplace_back(fs::last_write_time(p.path()), p.path());
+        }
+    }
+    if ((int)step_ckpts.size() <= keep_last) return;
+
+    // newest first
+    std::sort(step_ckpts.begin(), step_ckpts.end(),
+              [](auto& a, auto& b){ return a.first > b.first; });
+
+    for (size_t i = keep_last; i < step_ckpts.size(); ++i) {
+        std::error_code ec;
+        std::cout << "Pruning old checkpoint: " << step_ckpts[i].second.filename().string() << std::endl;
+        std::filesystem::remove(step_ckpts[i].second, ec);
+        if (ec) {
+            std::cerr << "Warning: failed to remove " << step_ckpts[i].second << " (" << ec.message() << ")\n";
+        }
+    }
+}
+
 
 // Simple CLI argument parser
 std::unordered_map<std::string, std::string> parse_args(int argc, char** argv) {
@@ -44,6 +79,12 @@ int main(int argc, char** argv) {
     std::string tokens_path = args.count("--tokens-path") ? args["--tokens-path"] : "tokens.bin";
     bool force_reset = args.count("--reset");
     int log_every = args.count("--log-every") ? std::stoi(args["--log-every"]) : 50;
+    int ckpt_every = args.count("--ckpt-every") ? std::stoi(args["--ckpt-every"]) : 500;
+    int keep_last  = args.count("--keep-last")  ? std::stoi(args["--keep-last"])  : 5;
+
+
+    if (keep_last < 1) keep_last = 1;
+    if (ckpt_every < 0) ckpt_every = 0; // 0 disables periodic ckpt
 
 
     // ---- Tokenizer + Dataset ----
@@ -145,18 +186,27 @@ int main(int argc, char** argv) {
                     << " | Accuracy: " << acc * 100.0f << "%"
                     << " | Time: " << ms << " ms" << std::endl;
         }
-        if ((step % 500) == 0 && step > 0) {
+        if (ckpt_every > 0 && step > 0 && (step % ckpt_every) == 0) {
             std::stringstream fname;
             fname << "gpt_checkpoint_step" << step << ".bin";
+            std::cout << "Saving checkpoint to " << fname.str() << " ..." << std::endl;
             model.save_checkpoint(fname.str());
+            std::cout << "Checkpoint saved." << std::endl;
+
+            // keep only newest N step-checkpoints
+            prune_old_checkpoints(".", "gpt_checkpoint", keep_last);
         }
+
 
     }
 
     hipEventDestroy(start);
     hipEventDestroy(stop);
 
+    std::cout << "Saving final checkpoint to gpt_checkpoint.bin ..." << std::endl;
     model.save_checkpoint("gpt_checkpoint.bin");
+    std::cout << "Checkpoint saved successfully." << std::endl;
+
 
     // ---- Cleanup ----
     hipFree(d_logits);
