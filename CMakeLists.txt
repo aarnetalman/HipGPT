@@ -1,9 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
-# Add HIP as a project language
 project(HIP_GPT LANGUAGES CXX HIP)
 
 # --- Dependency Management ---
-# Automatically fetch the nlohmann-json library
 include(FetchContent)
 FetchContent_Declare(
   nlohmann_json
@@ -12,48 +10,35 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
-
 # --- HIP & Compiler Setup ---
 find_package(HIP REQUIRED)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 
 # --- Source Files ---
-set(GPT_SOURCES
-    gpt_model.cpp
-    transformer_layer.cpp
-    hip_kernels.cpp
-    tokenizer.cpp
-)
+# Use a glob to find all .cpp files in the src directory
+file(GLOB GPT_SOURCES "src/*.cpp")
+
+# Separate the main files for the executables
+list(FILTER GPT_SOURCES EXCLUDE REGEX ".*/(train_gpt|generate)\\.cpp$")
+set(TRAIN_MAIN_SRC src/train_gpt.cpp)
+set(GENERATE_MAIN_SRC src/generate.cpp)
 
 # --- Executables ---
-add_executable(train_gpt
-    train_gpt.cpp
-    ${GPT_SOURCES}
-)
-
-add_executable(generate
-    generate.cpp
-    ${GPT_SOURCES}
-)
+add_executable(train_gpt ${TRAIN_MAIN_SRC} ${GPT_SOURCES})
+add_executable(generate ${GENERATE_MAIN_SRC} ${GPT_SOURCES})
 
 # --- Include Directories ---
+# Add the 'include' and the downloaded json library directories
 target_include_directories(train_gpt PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    # Add the include directory for the downloaded json library
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${nlohmann_json_SOURCE_DIR}/include
 )
 target_include_directories(generate PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    # Add the include directory for the downloaded json library
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${nlohmann_json_SOURCE_DIR}/include
 )
 
 # --- Link Libraries ---
-# Note: When HIP is a project language, linking is often handled automatically.
-# Explicitly linking is still safe.
 target_link_libraries(train_gpt PRIVATE HIP::hiprtc HIP::device HIP::host)
 target_link_libraries(generate PRIVATE HIP::hiprtc HIP::device HIP::host)
-
-# Optional: Enable verbose output
-set(CMAKE_VERBOSE_MAKEFILE ON)

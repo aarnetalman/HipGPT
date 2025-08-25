@@ -1,6 +1,8 @@
 # HIP-GPT: A GPT-2 Implementation in C++ and HIP
 
-HIP-GPT is a lightweight, implementation of a GPT-2 style transformer model written from scratch in C++ and accelerated using AMD's **HIP API** for ROCm-enabled GPUs. This project includes all the necessary components for a modern language model: a custom BPE tokenizer, a transformer-based GPT model, and high-performance GPU kernels for training and inference.
+[](https://opensource.org/licenses/MIT)
+
+HIP-GPT is a lightweight, implementation of a GPT-2 style transformer model written from scratch in C++ and accelerated using AMD's **[HIP API](https://rocm.docs.amd.com/en/latest/understand/hip_api/hip_api.html)** for ROCm-enabled GPUs. This project includes all the necessary components for a modern language model: a custom BPE tokenizer, a transformer-based GPT model, and high-performance GPU kernels for training and inference.
 
 The entire project is self-contained and designed to be a clear, understandable guide to the inner workings of large language models.
 
@@ -110,19 +112,51 @@ For example:
 
 ## Project Structure
 
+The project is organized into `src` and `include` directories for a clean separation of source and header files.
+
 ```
 .
-├── scripts/
-│   ├── download_wikitext.sh  # Downloads and prepares the training data.
-│   └── run_train.sh          # A convenient wrapper to run the training script.
-├── CMakeLists.txt            # The build configuration file for the project.
-├── generate.cpp              # Main file for the text generation executable.
-├── gpt_model.cpp/.h          # Implements the top-level GPT model architecture.
-├── hip_kernels.cpp/.h        # Contains all custom GPU kernels written in HIP.
-├── tokenizer.cpp/.h          # Implements the BPE tokenizer.
-├── train_gpt.cpp             # Main file for the model training executable.
-└── transformer_layer.cpp/.h  # Implements a single transformer block/layer.
+├── build/                 # Build files (created by CMake)
+├── data/                  # Data files (e.g., data.txt)
+├── scripts/               # Helper scripts (e.g., download_wikitext.sh)
+|
+├── include/               # All public header files (.h)
+│   ├── gpt_model.h
+│   ├── hip_kernels.h
+│   ├── tokenizer.h
+│   └── transformer_layer.h
+│
+├── src/                   # All source files (.cpp)
+│   ├── generate.cpp
+│   ├── gpt_model.cpp
+│   ├── hip_kernels.cpp
+│   ├── tokenizer.cpp
+│   ├── train_gpt.cpp
+│   └── transformer_layer.cpp
+│
+├── CMakeLists.txt         # Main build configuration
+├── LICENSE                # Your project's license
+└── README.md              # Project documentation
 ```
+
+-----
+
+## Architecture Overview
+
+  * **BPE Tokenizer**: The `Tokenizer` class is responsible for converting raw text into a sequence of integer token IDs that the model can understand. It can be trained from scratch on a corpus to learn a vocabulary of sub-word units.
+  * **Transformer Layer**: The `TransformerLayer` is the core building block of the model. It contains a multi-head self-attention mechanism and a position-wise feed-forward network, with residual connections and layer normalization.
+  * **GPT Model**: The `GPTModel` class assembles the entire network. It manages the token and positional embeddings, stacks multiple `TransformerLayer` instances, and adds a final linear layer to produce output logits over the vocabulary.
+
+-----
+
+## Future Work
+
+This project serves as a strong foundation. Future improvements could include:
+
+  * **KV Cache**: Implement a Key-Value cache for the attention mechanism to dramatically speed up text generation.
+  * **Kernel Optimization**: Further optimize HIP kernels using techniques like tiling and shared memory for matrix multiplication.
+  * **Advanced Sampling**: Add more sophisticated sampling strategies like nucleus sampling (top-p).
+  * **Mixed-Precision Training**: Support for training with `fp16` precision to reduce memory usage and improve performance.
 
 -----
 
