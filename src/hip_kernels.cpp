@@ -785,21 +785,27 @@ void launch_embedding_backward(const float* grad_out, const int* token_ids,
     std::cout << "embedding_backward_kernel completed successfully" << std::endl;
 }
 
-__global__ void matmul_transpose_B_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y; // M dimension
+__global__ void matmul_transpose_B_kernel(
+    const float* A, const float* B, float* C, 
+    int M, int N, int K, int chunk_offset, int chunk_size, bool clear_output
+) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y; // M dimension  
     int col = blockIdx.x * blockDim.x + threadIdx.x; // K dimension
     if (row >= M || col >= K) return;
 
     float sum = 0.0f;
-    // Limit iterations to prevent timeout
-    int chunk_size = min(N, 256);
-    for (int i = 0; i < chunk_size && i < N; ++i) {
+    
+    // Process this chunk: from chunk_offset to chunk_offset + chunk_size
+    int end_idx = min(chunk_offset + chunk_size, N);
+    for (int i = chunk_offset; i < end_idx; ++i) {
         sum += A[row * N + i] * B[col * N + i]; // B is transposed
     }
     
-    if (N <= chunk_size) {
+    if (clear_output) {
+        // First chunk: overwrite
         C[row * K + col] = sum;
     } else {
+        // Subsequent chunks: accumulate
         atomicAdd(&C[row * K + col], sum);
     }
 }
@@ -807,24 +813,22 @@ __global__ void matmul_transpose_B_kernel(const float* A, const float* B, float*
 void launch_matmul_transpose_B(const float* A, const float* B, float* C, int M, int N, int K) {
     std::cout << "Launching matmul_transpose_B_kernel: M=" << M << ", N=" << N << ", K=" << K << std::endl;
     
-    // Clear output matrix first if N > 256
-    if (N > 256) {
-        hipMemset(C, 0, M * K * sizeof(float));
-    }
-    
     dim3 threads(16, 16);
     dim3 blocks((K + 15) / 16, (M + 15) / 16);
     
-    // Launch multiple kernels if N is large
-    int chunk_size = 256;
+    // Process in chunks to avoid timeout
+    int chunk_size = 256;  // Can be larger for this direction
     int num_chunks = (N + chunk_size - 1) / chunk_size;
     
+    std::cout << "Processing in " << num_chunks << " chunks of size " << chunk_size << std::endl;
+    
     for (int chunk = 0; chunk < num_chunks; ++chunk) {
-        int offset = chunk * chunk_size;
-        int current_chunk_size = min(chunk_size, N - offset);
+        int chunk_offset = chunk * chunk_size;
+        int current_chunk_size = min(chunk_size, N - chunk_offset);
+        bool is_first_chunk = (chunk == 0);
         
         hipLaunchKernelGGL(matmul_transpose_B_kernel, blocks, threads, 0, 0, 
-                          A + offset, B + offset, C, M, current_chunk_size, K);
+                          A, B, C, M, N, K, chunk_offset, current_chunk_size, is_first_chunk);
         
         // Check for errors after each chunk
         hipError_t err = hipGetLastError();
@@ -845,23 +849,31 @@ void launch_matmul_transpose_B(const float* A, const float* B, float* C, int M, 
     std::cout << "matmul_transpose_B_kernel completed successfully (processed " << num_chunks << " chunks)" << std::endl;
 }
 
-__global__ void matmul_transpose_A_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
+
+
+// Fixed matmul_transpose_A_kernel and launch function with correct memory indexing
+
+__global__ void matmul_transpose_A_kernel(
+    const float* A, const float* B, float* C, 
+    int M, int N, int K, int chunk_offset, int chunk_size, bool clear_output
+) {
     int row = blockIdx.y * blockDim.y + threadIdx.y; // K dimension
     int col = blockIdx.x * blockDim.x + threadIdx.x; // N dimension
     if (row >= K || col >= N) return;
 
     float sum = 0.0f;
-    // Limit iterations to prevent timeout - process in chunks if needed
-    int chunk_size = min(M, 256);  // Process at most 256 iterations per thread
-    for (int i = 0; i < chunk_size && i < M; ++i) {
+    
+    // Process this chunk: from chunk_offset to chunk_offset + chunk_size
+    int end_idx = min(chunk_offset + chunk_size, M);
+    for (int i = chunk_offset; i < end_idx; ++i) {
         sum += A[i * K + row] * B[i * N + col];
     }
     
-    // If M > chunk_size, we need multiple kernel launches or a different strategy
-    if (M <= chunk_size) {
+    if (clear_output) {
+        // First chunk: overwrite
         C[row * N + col] = sum;
     } else {
-        // For large M, use atomic add to accumulate results
+        // Subsequent chunks: accumulate
         atomicAdd(&C[row * N + col], sum);
     }
 }
@@ -869,24 +881,25 @@ __global__ void matmul_transpose_A_kernel(const float* A, const float* B, float*
 void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, int N, int K) {
     std::cout << "Launching matmul_transpose_A_kernel: M=" << M << ", N=" << N << ", K=" << K << std::endl;
     
-    // Clear output matrix first if M > 256 (we'll use multiple kernel calls)
-    if (M > 256) {
-        hipMemset(C, 0, K * N * sizeof(float));
-    }
-    
     dim3 threads(16, 16);
     dim3 blocks((N + 15) / 16, (K + 15) / 16);
     
-    // Launch multiple kernels if M is large
-    int chunk_size = 256;
+    // Process in chunks to avoid timeout
+    int chunk_size = 128;  // Smaller chunk size for safety
     int num_chunks = (M + chunk_size - 1) / chunk_size;
     
+    std::cout << "Processing in " << num_chunks << " chunks of size " << chunk_size << std::endl;
+    
     for (int chunk = 0; chunk < num_chunks; ++chunk) {
-        int offset = chunk * chunk_size;
-        int current_chunk_size = min(chunk_size, M - offset);
+        int chunk_offset = chunk * chunk_size;
+        int current_chunk_size = min(chunk_size, M - chunk_offset);
+        bool is_first_chunk = (chunk == 0);
+        
+        std::cout << "  Processing chunk " << chunk << "/" << num_chunks 
+                  << " (offset=" << chunk_offset << ", size=" << current_chunk_size << ")" << std::endl;
         
         hipLaunchKernelGGL(matmul_transpose_A_kernel, blocks, threads, 0, 0, 
-                          A + offset * K, B + offset * N, C, current_chunk_size, N, K);
+                          A, B, C, M, N, K, chunk_offset, current_chunk_size, is_first_chunk);
         
         // Check for errors after each chunk
         hipError_t err = hipGetLastError();
@@ -902,6 +915,8 @@ void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, 
                       << __FILE__ << ":" << __LINE__ << " - " << hipGetErrorString(err) << std::endl;
             exit(1);
         }
+        
+        std::cout << "  Chunk " << chunk << " completed successfully" << std::endl;
     }
     
     std::cout << "matmul_transpose_A_kernel completed successfully (processed " << num_chunks << " chunks)" << std::endl;
