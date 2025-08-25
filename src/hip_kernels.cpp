@@ -2,6 +2,7 @@
 #include "hip_kernels.h"
 #include <hip/hip_runtime.h>
 #include <cmath>
+#include <cfloat>
 
 // Simple XOR-WOW pseudo-random number generator state
 struct xorwow_state {
@@ -799,9 +800,8 @@ __global__ void multihead_attention_backward_kernel(
     const float* q_vec = q_in + token_i * E + head_h * head_dim;
     const float* grad_head_out_vec = grad_attn_out + token_i * E + head_h * head_dim;
 
-    // Use shared memory for scores to avoid re-computation issues
     extern __shared__ float s_data[];
-    float* scores = s_data; // S floats for scores
+    float* scores = s_data; 
     
     // Step 1: Recompute attention scores (q @ k^T / sqrt(d_k))
     for (int j = 0; j < S; ++j) {
@@ -828,30 +828,31 @@ __global__ void multihead_attention_backward_kernel(
         scores[j] *= inv_sum_exp; // scores[] now holds softmax probabilities
     }
     
-    // Allocate local buffers for accumulating gradients for this thread's Q
+    // --- BACKPROPAGATION ---
     float grad_q_accum[128]; // Max head_dim <= 128
     for(int d = 0; d < head_dim; ++d) grad_q_accum[d] = 0.0f;
+    
+    float grad_softmax_scores[512]; // Max seq_len <= 512
 
-    // grad_output * V^T -> grad_softmax_scores
-    // We loop through each token 'j' in the sequence to calculate gradients
+    // Calculate grad w.r.t. softmax output
     for (int j = 0; j < S; ++j) {
         const float* v_vec = v_in + (batch_start_idx + j) * E + head_h * head_dim;
-        float grad_softmax_score = 0.0f;
+        float dot = 0.0f;
         for (int d = 0; d < head_dim; ++d) {
-            grad_softmax_score += grad_head_out_vec[d] * v_vec[d];
+            dot += grad_head_out_vec[d] * v_vec[d];
         }
+        grad_softmax_scores[j] = dot;
+    }
 
-        // Backprop through softmax
+    // Backprop through softmax
+    float dot_product_sum = 0.0f;
+    for (int j = 0; j < S; ++j) {
+        dot_product_sum += grad_softmax_scores[j] * scores[j];
+    }
+
+    for (int j = 0; j < S; ++j) {
         float softmax_val = scores[j];
-        float grad_score = 0.0f;
-        for (int k = 0; k < S; ++k) {
-            float grad_softmax_k = (k == j) ? grad_softmax_score : 0.0f; // Simplified for clarity
-            float delta = (k == j) ? 1.0f : 0.0f;
-            grad_score += (grad_softmax_k - grad_softmax_score * softmax_val) * (delta * softmax_val - softmax_val * scores[k]);
-        }
-        grad_score = softmax_val * (grad_softmax_score - dot(scores, grad_softmax_scores, S));
-        grad_score *= scale;
-
+        float grad_score = scale * softmax_val * (grad_softmax_scores[j] - dot_product_sum);
 
         const float* k_vec = k_in + (batch_start_idx + j) * E + head_h * head_dim;
         for (int d = 0; d < head_dim; ++d) {
