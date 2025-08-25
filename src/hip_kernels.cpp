@@ -562,8 +562,8 @@ void launch_layer_norm_backward(const float* grad_output, const float* input,
                                 float* grad_gamma, float* grad_beta, int N, int E)
 {
     // zero the parameter grads before accumulate
-    HIP_CHECK(hipMemset(grad_gamma, 0, E*sizeof(float)));
-    HIP_CHECK(hipMemset(grad_beta,  0, E*sizeof(float)));
+    hipMemset(grad_gamma, 0, E*sizeof(float));
+    hipMemset(grad_beta,  0, E*sizeof(float));
 
     dim3 blocks(N);
     int threads = 1;
@@ -571,7 +571,6 @@ void launch_layer_norm_backward(const float* grad_output, const float* input,
     size_t shmem = (size_t) (3 * threads) * sizeof(float);
     hipLaunchKernelGGL(layernorm_backward_kernel, blocks, dim3(threads), shmem, 0,
                        grad_output, input, grad_input, gamma, grad_gamma, grad_beta, N, E, 1e-5f);
-    HIP_CHECK_KERNEL("layernorm_backward_kernel_ref");
 }
 
 
