@@ -336,6 +336,14 @@ __global__ void softmax_loss_kernel(
 
     float log_sum = logf(sum_exp);
     int label = labels[idx];
+    if (label < 0 || label >= V) {
+        for (int i = 0; i < V; ++i) {
+            softmax_out[idx * V + i] = 0.0f;
+            grad_out[idx * V + i] = 0.0f;
+        }
+    return;
+}
+
     float log_prob = logits[idx * V + label] - max_logit - log_sum;
 
     atomicAdd(loss_sum, -log_prob);  // accumulate negative log likelihood
@@ -767,4 +775,126 @@ void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, 
     // Output C is (K, N), so blocks are based on N and K
     dim3 blocks((N + 15) / 16, (K + 15) / 16);
     hipLaunchKernelGGL(matmul_transpose_A_kernel, blocks, threads, 0, 0, A, B, C, M, N, K);
+}
+
+// Add this entire block of code to the end of hip_kernels.cpp
+
+__global__ void multihead_attention_backward_kernel(
+    const float* grad_attn_out, // [B*S, E]
+    const float* q_in,          // [B*S, E]
+    const float* k_in,          // [B*S, E]
+    const float* v_in,          // [B*S, E]
+    float* grad_q_out,          // [B*S, E]
+    float* grad_k_out,          // [B*S, E]
+    float* grad_v_out,          // [B*S, E]
+    int B, int S, int E, int H
+) {
+    int token_i = blockIdx.x * blockDim.x + threadIdx.x;
+    int head_h = blockIdx.y;
+
+    if (token_i >= B * S) return;
+
+    int head_dim = E / H;
+    const float scale = 1.0f / sqrtf(head_dim);
+
+    const int batch_start_idx = (token_i / S) * S;
+
+    const float* q_vec = q_in + token_i * E + head_h * head_dim;
+    const float* grad_head_out_vec = grad_attn_out + token_i * E + head_h * head_dim;
+
+    // --- Recompute softmax scores for this token ---
+    extern __shared__ float s_data[];
+    float* scores = s_data; // S floats for scores
+    
+    // 1. Calculate scores
+    for (int j = 0; j < S; ++j) {
+        const float* k_vec = k_in + (batch_start_idx + j) * E + head_h * head_dim;
+        float dot_product = 0.0f;
+        for (int d = 0; d < head_dim; ++d) {
+            dot_product += q_vec[d] * k_vec[d];
+        }
+        scores[j] = dot_product * scale;
+    }
+
+    // 2. Softmax
+    float max_score = -1e9f;
+    for (int j = 0; j < S; ++j) { if (scores[j] > max_score) max_score = scores[j]; }
+    float sum_exp = 0.0f;
+    for (int j = 0; j < S; ++j) {
+        scores[j] = expf(scores[j] - max_score);
+        sum_exp += scores[j];
+    }
+    for (int j = 0; j < S; ++j) {
+        scores[j] /= sum_exp; // scores[] now holds softmax probabilities
+    }
+    // --- End recomputation ---
+
+    // --- Start Backpropagation ---
+    float grad_q_buffer[128]; // Max head_dim, assumes <= 128
+    for(int d=0; d<head_dim; ++d) grad_q_buffer[d] = 0.0f;
+
+    // Calculate grad_softmax_scores and grad_V
+    float grad_softmax_scores[512]; // Max seq_len, assumes S <= 512
+    for (int j = 0; j < S; ++j) {
+        const float* v_vec = v_in + (batch_start_idx + j) * E + head_h * head_dim;
+        float grad_softmax_score = 0.0f;
+        for (int d = 0; d < head_dim; ++d) {
+            grad_softmax_score += grad_head_out_vec[d] * v_vec[d];
+            // grad_V: Each output grad contributes to grad_V based on softmax weight
+            atomicAdd(&grad_v_out[(batch_start_idx + j) * E + head_h * head_dim + d], scores[j] * grad_head_out_vec[d]);
+        }
+        grad_softmax_scores[j] = grad_softmax_score;
+    }
+
+    // Backprop through softmax to get grad_scores
+    float grad_scores[512];
+    float sum_term = 0.0f;
+    for (int j = 0; j < S; ++j) { sum_term += grad_softmax_scores[j] * scores[j]; }
+    for (int j = 0; j < S; ++j) {
+        grad_scores[j] = scale * (grad_softmax_scores[j] - sum_term) * scores[j];
+    }
+
+    // Backprop through scores to get grad_Q and grad_K
+    for (int j = 0; j < S; ++j) {
+        const float* k_vec = k_in + (batch_start_idx + j) * E + head_h * head_dim;
+        for (int d = 0; d < head_dim; ++d) {
+            // grad_Q: Accumulate contributions from all K's
+            grad_q_buffer[d] += grad_scores[j] * k_vec[d];
+            // grad_K: Each token i's Q contributes to grad_K at position j
+            atomicAdd(&grad_k_out[(batch_start_idx + j) * E + head_h * head_dim + d], grad_scores[j] * q_vec[d]);
+        }
+    }
+    
+    // Write out final accumulated grad_Q
+    for (int d = 0; d < head_dim; ++d) {
+        grad_q_out[token_i * E + head_h * head_dim + d] = grad_q_buffer[d];
+    }
+}
+
+
+void launch_multihead_attention_backward(
+    const float* d_grad_attn_output, const float* d_qkv,
+    float* d_grad_qkv, int B, int S, int E, int H
+) {
+    const float* d_Q = d_qkv;
+    const float* d_K = d_qkv + (B * S * E);
+    const float* d_V = d_qkv + 2 * (B * S * E);
+
+    float* d_grad_Q = d_grad_qkv;
+    float* d_grad_K = d_grad_qkv + (B * S * E);
+    float* d_grad_V = d_grad_qkv + 2 * (B * S * E);
+    
+    // Zero out the gradient buffers before accumulating
+    hipMemset(d_grad_qkv, 0, (size_t)B * S * E * 3 * sizeof(float));
+
+    int total_tokens = B * S;
+    int threads_per_block = 256;
+    dim3 blocks((total_tokens + threads_per_block - 1) / threads_per_block, H);
+    dim3 threads(threads_per_block);
+    
+    // Shared memory for re-computing softmax scores
+    size_t shared_mem_size = S * sizeof(float);
+
+    hipLaunchKernelGGL(multihead_attention_backward_kernel, blocks, threads, shared_mem_size, 0,
+        d_grad_attn_output, d_Q, d_K, d_V, d_grad_Q, d_grad_K, d_grad_V, B, S, E, H);
 }

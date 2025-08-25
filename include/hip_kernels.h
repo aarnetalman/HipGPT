@@ -21,6 +21,8 @@ float launch_accuracy(const float* d_softmax, const int* d_labels, int total_tok
 void launch_embedding_backward(const float* grad_out, const int* token_ids,
                                float* grad_token_embed, float* grad_pos_embed,
                                int B, int S, int E);
+void launch_embedding_lookup(const int* d_token_ids, const float* d_token_embed, const float* d_pos_embed,
+                             float* d_output, int batch_size, int seq_len, int vocab_size, int embed_dim);
 
 // Optimizers
 void launch_sgd_update(float* weights, const float* grads, float lr, int size);
@@ -46,3 +48,8 @@ void launch_dropout_backward(const float* grad_output, const float* mask, float 
 
 // Sampling
 void launch_sample_from_logits(const float* d_logits, int* d_output_token, int vocab_size, int k, float temperature);
+
+void launch_multihead_attention_backward(
+    const float* d_grad_attn_output, const float* d_qkv, const float* d_softmax,
+    float* d_grad_qkv, int B, int S, int E, int H
+);
