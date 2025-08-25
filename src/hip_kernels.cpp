@@ -607,30 +607,28 @@ void launch_sample_from_logits(const float* d_logits, int* d_output_token, int v
 
 __global__ void embedding_backward_kernel(const float* grad_out, const int* token_ids,
                                           float* grad_token_embed, float* grad_pos_embed,
-                                          int B, int S, int E) {
+                                          int B, int S, int E, int V) {
     int b = blockIdx.x;
     int s = blockIdx.y;
     int e = blockIdx.z * blockDim.x + threadIdx.x;
-
     if (b >= B || s >= S || e >= E) return;
 
     int token_id = token_ids[b * S + s];
-    const float* g = grad_out + (b * S + s) * E + e;
+    if (token_id < 0 || token_id >= V) return;   // <-- critical
 
+    const float* g = grad_out + (b * S + s) * E + e;
     atomicAdd(&grad_token_embed[token_id * E + e], *g);
     atomicAdd(&grad_pos_embed[s * E + e], *g);
 }
 
-
 void launch_embedding_backward(const float* grad_out, const int* token_ids,
                                float* grad_token_embed, float* grad_pos_embed,
-                               int B, int S, int E) {
-    int tpb = (E >= 1024) ? 1024 : E;                  
-    int bz  = (E + tpb - 1) / tpb;                     
-    dim3 blocks(B, S, bz);
-    dim3 threads(tpb);
+                               int B, int S, int E, int V) {
+    int tpb = (E >= 1024) ? 1024 : E;
+    int bz  = (E + tpb - 1) / tpb;
+    dim3 blocks(B, S, bz), threads(tpb);
     hipLaunchKernelGGL(embedding_backward_kernel, blocks, threads, 0, 0,
-                       grad_out, token_ids, grad_token_embed, grad_pos_embed, B, S, E);
+                       grad_out, token_ids, grad_token_embed, grad_pos_embed, B, S, E, V);
 }
 
 

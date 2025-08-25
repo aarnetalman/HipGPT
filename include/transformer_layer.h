@@ -1,4 +1,3 @@
-// File: transformer_layer.h
 #pragma once
 
 #include <hip/hip_runtime.h>
@@ -36,7 +35,7 @@ private:
     float* d_ff2_weight_ = nullptr;
     // Biases
     float* d_qkv_bias_  = nullptr;
-     float* d_o_bias_ = nullptr;
+    float* d_o_bias_ = nullptr;
     float* d_ff1_bias_  = nullptr;
     float* d_ff2_bias_  = nullptr;
     // Weight Gradients
@@ -46,7 +45,7 @@ private:
     float* d_ff2_grad_weight_ = nullptr;
     // Bias Gradients
     float* d_qkv_grad_bias_ = nullptr;
-    float* d_o_grad_bias_ = nullptr; 
+    float* d_o_grad_bias_ = nullptr;
     float* d_ff1_grad_bias_ = nullptr;
     float* d_ff2_grad_bias_ = nullptr;
 
@@ -63,7 +62,7 @@ private:
     // --- Adam Optimizer States ---
     float* d_qkv_m_ = nullptr; float* d_qkv_v_ = nullptr;
     float* d_o_m_ = nullptr; float* d_o_v_ = nullptr;
-    float* d_o_m_bias_ = nullptr; float* d_o_v_bias_ = nullptr; 
+    float* d_o_m_bias_ = nullptr; float* d_o_v_bias_ = nullptr;
     float* d_ff1_m_ = nullptr; float* d_ff1_v_ = nullptr;
     float* d_ff2_m_ = nullptr; float* d_ff2_v_ = nullptr;
     float* d_attn_norm_m_gamma_ = nullptr; float* d_attn_norm_v_gamma_ = nullptr;
@@ -76,6 +75,7 @@ private:
     float* d_attn_output_ = nullptr;
     float* d_ff1_output_ = nullptr;
     float* d_ff2_output_ = nullptr;
+    float* d_ffn_input_ = nullptr; // Buffer for the input to the FFN
     float* d_residual_input_ = nullptr;
     float* d_attn_dropout_mask_ = nullptr;
     float* d_ffn_dropout_mask_ = nullptr;
@@ -86,6 +86,7 @@ private:
     float* d_qkv_grad_input_ = nullptr;
     float* d_grad_attn_output_ = nullptr;
     float* d_grad_qkv_output_ = nullptr;
+    
     // Private methods
     void allocate_weights();
     void allocate_temp_buffers(int batch_size, int seq_len);

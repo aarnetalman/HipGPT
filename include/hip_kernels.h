@@ -20,7 +20,7 @@ float launch_accuracy(const float* d_softmax, const int* d_labels, int total_tok
 // Embeddings
 void launch_embedding_backward(const float* grad_out, const int* token_ids,
                                float* grad_token_embed, float* grad_pos_embed,
-                               int B, int S, int E);
+                               int B, int S, int E, int V);
 void launch_embedding_lookup(const int* d_token_ids, const float* d_token_embed, const float* d_pos_embed,
                              float* d_output, int batch_size, int seq_len, int vocab_size, int embed_dim);
 
