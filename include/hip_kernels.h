@@ -3,6 +3,10 @@
 
 #include <hip/hip_runtime.h>
 
+void print_gpu_info();
+void check_gpu_memory();
+void debug_checkpoint(const std::string& location);
+
 // Matrix multiplication and its backward pass
 void launch_matmul(const float* A, const float* B, float* C, int M, int N, int K);
 void launch_matmul_add_bias(const float* A, const float* B, const float* bias, float* C, int M, int N, int K);
