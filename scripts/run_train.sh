@@ -3,17 +3,14 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
-# Ensure we are in the script directory
-cd "$(dirname "$0")" || exit
+# Go to project root from script directory
+cd "$(dirname "$0")/.." || exit
 
-# Go to project root
-cd .. || exit
-
-# Check if the executable exists
-if [ ! -f "train_gpt" ]; then
-    echo "Error: train_gpt executable not found. Please run 'cmake .' and 'make' first."
+# Check if the executable exists inside the build directory
+if [ ! -f "build/train_gpt" ]; then
+    echo "Error: build/train_gpt executable not found. Please run 'cmake ..' and 'make' from the build directory first."
     exit 1
 fi
 
-# Run training with default arguments or override with CLI
-./train_gpt "$@"
+# Run training executable from the build directory
+./build/train_gpt "$@"
