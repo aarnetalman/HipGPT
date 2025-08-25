@@ -691,7 +691,7 @@ __global__ void multihead_attention_backward_kernel(
 
     // Dynamic shared mem layout: [scores | grad_softmax | grad_scores], each length S
     extern __shared__ unsigned char smem[];
-    float* scores          = smem;
+    float* scores          = reinterpret_cast<float*>(smem);
     float* grad_softmax    = scores + S;
     float* grad_scores     = scores + 2 * S;
 
