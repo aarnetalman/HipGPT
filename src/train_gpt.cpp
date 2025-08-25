@@ -36,15 +36,16 @@ int main(int argc, char** argv) {
     int batch_size = args.count("--batch") ? std::stoi(args["--batch"]) : 4;
     int num_steps = args.count("--steps") ? std::stoi(args["--steps"]) : 10;
     float learning_rate = args.count("--lr") ? std::stof(args["--lr"]) : 1e-2f;
+    int vocab_size_limit = args.count("--vocab-size") ? std::stoi(args["--vocab-size"]) : 5000;
 
     // File paths from CLI or defaults
-    std::string data_path = args.count("--data_path") ? args["--data_path"] : "data.txt";
-    std::string tokenizer_path = args.count("--tokenizer_path") ? args["--tokenizer_path"] : "tokenizer.json";
-    std::string tokens_path = args.count("--tokens_path") ? args["--tokens_path"] : "tokens.bin";
+    std::string data_path = args.count("--data-path") ? args["--data-path"] : "data/data.txt";
+    std::string tokenizer_path = args.count("--tokenizer-path") ? args["--tokenizer-path"] : "tokenizer.json";
+    std::string tokens_path = args.count("--tokens-path") ? args["--tokens-path"] : "tokens.bin";
     bool force_reset = args.count("--reset");
 
     // ---- Tokenizer + Dataset ----
-    Tokenizer tokenizer(5000);
+    Tokenizer tokenizer(vocab_size_limit);
 
     std::vector<int> tokens;
 
@@ -59,7 +60,7 @@ int main(int argc, char** argv) {
     } else {
         std::ifstream file(data_path);
         if (!file) {
-            std::cerr << "Error: data.txt not found.\n";
+            std::cerr << "Error: " << data_path << " not found.\n";
             return 1;
         }
         std::stringstream buffer;

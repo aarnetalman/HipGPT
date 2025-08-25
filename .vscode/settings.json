@@ -49,6 +49,10 @@
         "set": "cpp",
         "unordered_map": "cpp",
         "fstream": "cpp",
-        "chrono": "cpp"
+        "chrono": "cpp",
+        "__node_handle": "cpp",
+        "charconv": "cpp",
+        "iomanip": "cpp",
+        "optional": "cpp"
     }
 }
