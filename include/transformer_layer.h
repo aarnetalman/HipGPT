@@ -81,6 +81,7 @@ private:
 
     // Private methods
     void allocate_weights();
+    void allocate_temp_buffers(int batch_size, int seq_len);
     void deallocate_temp_buffers();
     void self_attention_forward(const float* d_input, float* d_output, int batch_size, int seq_len);
     void feed_forward_forward(const float* d_input, float* d_output, int batch_size, int seq_len);
