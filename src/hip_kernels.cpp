@@ -690,7 +690,7 @@ __global__ void multihead_attention_backward_kernel(
     const float* gho   = grad_attn_out + token_i * E + head_h * head_dim;
 
     // Dynamic shared mem layout: [scores | grad_softmax | grad_scores], each length S
-    extern __shared__ float smem[];
+    extern __shared__ unsigned char smem[];
     float* scores          = smem;
     float* grad_softmax    = scores + S;
     float* grad_scores     = scores + 2 * S;
