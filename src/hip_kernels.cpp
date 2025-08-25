@@ -729,3 +729,42 @@ void launch_embedding_backward(const float* grad_out, const int* token_ids,
     hipLaunchKernelGGL(embedding_backward_kernel, blocks, threads, 0, 0,
                        grad_out, token_ids, grad_token_embed, grad_pos_embed, B, S, E);
 }
+
+// Kernel for C = A * B^T
+__global__ void matmul_transpose_B_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= M || col >= K) return;
+
+    float sum = 0.0f;
+    for (int i = 0; i < N; ++i) {
+        sum += A[row * N + i] * B[col * N + i]; // B is transposed
+    }
+    C[row * K + col] = sum;
+}
+
+void launch_matmul_transpose_B(const float* A, const float* B, float* C, int M, int N, int K) {
+    dim3 threads(16, 16);
+    dim3 blocks((K + 15) / 16, (M + 15) / 16);
+    hipLaunchKernelGGL(matmul_transpose_B_kernel, blocks, threads, 0, 0, A, B, C, M, N, K);
+}
+
+// Kernel for C = A^T * B
+__global__ void matmul_transpose_A_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y; // Corresponds to K
+    int col = blockIdx.x * blockDim.x + threadIdx.x; // Corresponds to N
+    if (row >= K || col >= N) return;
+
+    float sum = 0.0f;
+    for (int i = 0; i < M; ++i) {
+        sum += A[i * K + row] * B[i * N + col]; // A is transposed
+    }
+    C[row * N + col] = sum;
+}
+
+void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, int N, int K) {
+    dim3 threads(16, 16);
+    // Output C is (K, N), so blocks are based on N and K
+    dim3 blocks((N + 15) / 16, (K + 15) / 16);
+    hipLaunchKernelGGL(matmul_transpose_A_kernel, blocks, threads, 0, 0, A, B, C, M, N, K);
+}
