@@ -46,9 +46,6 @@ int main(int argc, char* argv[]) {
             temperature = std::stof(argv[++i]);
         } else {
             print_usage(argv[0]);
-            // --- START: Added cleanup ---
-            hipDeviceReset();
-            // --- END: Added cleanup ---
             return 1;
         }
     }
@@ -56,9 +53,6 @@ int main(int argc, char* argv[]) {
     if (prompt.empty()) {
         std::cerr << "Error: --prompt is required." << std::endl;
         print_usage(argv[0]);
-        // --- START: Added cleanup ---
-        hipDeviceReset();
-        // --- END: Added cleanup ---
         return 1;
     }
 
@@ -75,9 +69,6 @@ int main(int argc, char* argv[]) {
     std::vector<int> input_ids = tokenizer.encode(prompt);
     if (input_ids.empty()) {
         std::cerr << "Prompt did not produce any known tokens." << std::endl;
-        // --- START: Added cleanup ---
-        hipDeviceReset();
-        // --- END: Added cleanup ---
         return 1;
     }
 
@@ -95,6 +86,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << std::endl;
-    hipDeviceReset();
+
+    // The GPTModel destructor will be called automatically here, freeing all HIP resources.
     return 0;
 }
