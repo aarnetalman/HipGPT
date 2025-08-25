@@ -118,8 +118,9 @@ The project is organized into `src` and `include` directories for a clean separa
 .
 ├── build/                 # Build files (created by CMake)
 ├── data/                  # Data files (e.g., data.txt)
-├── scripts/               # Helper scripts (e.g., download_wikitext.sh)
-|
+├── scripts/               # Helper scripts
+│   ├── download_wikitext.sh
+│   ├── run_train.sh
 ├── include/               # All public header files (.h)
 │   ├── gpt_model.h
 │   ├── hip_kernels.h
