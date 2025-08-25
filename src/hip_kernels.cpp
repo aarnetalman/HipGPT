@@ -1,5 +1,5 @@
 // File: hip_kernels.cpp
-#include "hip_kernels.hh"
+#include "hip_kernels.h"
 #include <hip/hip_runtime.h>
 #include <cmath>
 #include <hip/hip_ext.h> // for hiprand functions

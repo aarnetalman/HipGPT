@@ -1,9 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
-# Add HIP as a project language
+# Renamed project as requested
 project(HipGPT LANGUAGES CXX HIP)
 
 # --- Dependency Management ---
-# Automatically fetch the nlohmann-json library
 include(FetchContent)
 FetchContent_Declare(
   nlohmann_json
@@ -12,17 +11,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
-
 # --- HIP & Compiler Setup ---
-# No need for find_package(HIP) when it's a language
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 
 # --- Source Files ---
-# Use a glob to find all .cpp files in the src directory
 file(GLOB GPT_SOURCES "src/*.cpp")
-
-# Separate the main files for the executables
 list(FILTER GPT_SOURCES EXCLUDE REGEX ".*/(train_gpt|generate)\\.cpp$")
 set(TRAIN_MAIN_SRC src/train_gpt.cpp)
 set(GENERATE_MAIN_SRC src/generate.cpp)
@@ -32,14 +26,15 @@ add_executable(train_gpt ${TRAIN_MAIN_SRC} ${GPT_SOURCES})
 add_executable(generate ${GENERATE_MAIN_SRC} ${GPT_SOURCES})
 
 # --- Include Directories ---
-# Add the 'include' and the downloaded json library directories
 target_include_directories(train_gpt PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${nlohmann_json_SOURCE_DIR}/include
+    ${HIP_INCLUDE_DIRS} 
 )
 target_include_directories(generate PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${nlohmann_json_SOURCE_DIR}/include
+    ${HIP_INCLUDE_DIRS} 
 )
 
 # Optional: Enable verbose output
