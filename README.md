@@ -39,7 +39,7 @@ cd HipGPT
 
 ### **3. Download the Dataset**
 
-The project includes a convenient script to download the WikiText-2 dataset and prepare it for training.
+The project includes a convenient script to download the Tiny Shakespeare dataset and prepare it for training.
 
 ```bash
 chmod +x scripts/download_data.sh
@@ -92,7 +92,7 @@ Once the model is trained, you can use the `generate` executable to create new t
 
 ```bash
 # From the build/ directory
-./generate --prompt "Alan Turing was a"
+./build/generate --prompt "To be, or not to be:"
 ```
 
 You can control the output with several parameters:
@@ -105,7 +105,7 @@ You can control the output with several parameters:
 For example:
 
 ```bash
-./generate --prompt "The history of computing began with" --num_tokens 100 --top_k 50
+./build/generate --prompt "My kingdom for a" --num_tokens 100 --top_k 50 --temp 0.8
 ```
 
 -----
@@ -119,7 +119,7 @@ The project is organized into `src` and `include` directories for a clean separa
 ├── build/                 # Build files (created by CMake)
 ├── data/                  # Data files (e.g., data.txt)
 ├── scripts/               # Helper scripts
-│   ├── download_wikitext.sh
+│   ├── download_data.sh
 │   └── run_train.sh
 ├── include/               # All public header files (.h)
 │   ├── gpt_model.h
