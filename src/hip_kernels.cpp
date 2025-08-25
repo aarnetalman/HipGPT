@@ -818,138 +818,16 @@ __global__ void matmul_transpose_A_kernel(const float* A, const float* B, float*
     C[row * N + col] = sum;
 }
 
-void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, int N, int K) {
-    std::cout << "Launching matmul_transpose_A_kernel: M=" << M << ", N=" << N << ", K=" << K << std::endl;
-    
-    if (M <= 0 || N <= 0 || K <= 0) {
-        std::cerr << "Error: Invalid matrix dimensions" << std::endl;
-        return;
-    }
-    
-    // === MEMORY DEBUGGING ===
-    std::cout << "=== MEMORY DEBUG ===" << std::endl;
-    std::cout << "Pointer A: " << A << std::endl;
-    std::cout << "Pointer B: " << B << std::endl; 
-    std::cout << "Pointer C: " << C << std::endl;
-    
-    // Check for null pointers
-    if (!A || !B || !C) {
-        std::cerr << "ERROR: One or more pointers are NULL!" << std::endl;
-        return;
-    }
-    
-    // Calculate expected memory sizes
-    size_t size_A = (size_t)M * K * sizeof(float);
-    size_t size_B = (size_t)M * N * sizeof(float);  
-    size_t size_C = (size_t)K * N * sizeof(float);
-    
-    std::cout << "Expected memory sizes:" << std::endl;
-    std::cout << "  A: " << size_A << " bytes (" << size_A/(1024*1024) << " MB)" << std::endl;
-    std::cout << "  B: " << size_B << " bytes (" << size_B/(1024*1024) << " MB)" << std::endl;
-    std::cout << "  C: " << size_C << " bytes (" << size_C/(1024*1024) << " MB)" << std::endl;
-    
-    // Try to check if memory is accessible (this might crash if pointers are bad)
-    std::cout << "Testing memory accessibility..." << std::endl;
-    
-    hipError_t err;
-    
-    // Try a simple memory operation to test if pointers are valid
-    float test_val;
-    err = hipMemcpy(&test_val, A, sizeof(float), hipMemcpyDeviceToHost);
-    if (err != hipSuccess) {
-        std::cerr << "ERROR: Cannot read from pointer A: " << hipGetErrorString(err) << std::endl;
-        return;
-    } else {
-        std::cout << "SUCCESS: A pointer is readable, first value: " << test_val << std::endl;
-    }
-    
-    err = hipMemcpy(&test_val, B, sizeof(float), hipMemcpyDeviceToHost);
-    if (err != hipSuccess) {
-        std::cerr << "ERROR: Cannot read from pointer B: " << hipGetErrorString(err) << std::endl;
-        return;
-    } else {
-        std::cout << "SUCCESS: B pointer is readable, first value: " << test_val << std::endl;
-    }
-    
-    // Test if C is writable
-    test_val = 123.456f;
-    err = hipMemcpy(C, &test_val, sizeof(float), hipMemcpyHostToDevice);
-    if (err != hipSuccess) {
-        std::cerr << "ERROR: Cannot write to pointer C: " << hipGetErrorString(err) << std::endl;
-        return;
-    } else {
-        std::cout << "SUCCESS: C pointer is writable" << std::endl;
-    }
-    
-    // Check GPU memory info
-    size_t free_mem, total_mem;
-    HIP_CHECK(hipMemGetInfo(&free_mem, &total_mem));
-    size_t used_mem = total_mem - free_mem;
-    
-    std::cout << "GPU Memory Status:" << std::endl;
-    std::cout << "  Total: " << total_mem/(1024*1024) << " MB" << std::endl;
-    std::cout << "  Free:  " << free_mem/(1024*1024) << " MB" << std::endl;
-    std::cout << "  Used:  " << used_mem/(1024*1024) << " MB" << std::endl;
-    
-    size_t total_needed = size_A + size_B + size_C;
-    std::cout << "  Needed for this operation: " << total_needed/(1024*1024) << " MB" << std::endl;
-    
-    if (total_needed > free_mem) {
-        std::cerr << "WARNING: Not enough GPU memory! Need " << total_needed/(1024*1024) 
-                  << " MB but only " << free_mem/(1024*1024) << " MB free" << std::endl;
-    }
-    
-    std::cout << "=== END MEMORY DEBUG ===" << std::endl;
-    
-    // If we get here, try a minimal kernel launch to test
-    std::cout << "Attempting minimal test kernel..." << std::endl;
-    
-    // Launch a tiny test kernel first
-    int test_threads = 32;
-    int test_blocks = 1;
-    
-    hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(test_blocks), dim3(test_threads), 0, 0, A, B, C, M, N, K);
-    
-    err = hipGetLastError();
-    if (err != hipSuccess) {
-        std::cerr << "ERROR: Kernel launch failed: " << hipGetErrorString(err) << std::endl;
-        return;
-    }
-    
-    err = hipDeviceSynchronize();
-    if (err != hipSuccess) {
-        std::cerr << "ERROR: Kernel execution failed: " << hipGetErrorString(err) << std::endl;
-        return;
-    }
-    
-    std::cout << "SUCCESS: Minimal test kernel completed!" << std::endl;
-    
-    // If the test kernel worked, try the full computation with very conservative settings
-    std::cout << "Test successful, proceeding with full computation..." << std::endl;
-    
-    // Use the most conservative settings possible
-    int total_elements = K * N;
-    int threads_per_block = 32;
-    int blocks = min(512, (total_elements + threads_per_block - 1) / threads_per_block);
-    
-    std::cout << "Using ultra-conservative settings: " << blocks << " blocks x " << threads_per_block << " threads" << std::endl;
-    
-    hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(blocks), dim3(threads_per_block), 0, 0, A, B, C, M, N, K);
-    
-    err = hipGetLastError();
-    if (err != hipSuccess) {
-        std::cerr << "ERROR: Full kernel launch failed: " << hipGetErrorString(err) << std::endl;
-        return;
-    }
-    
-    err = hipDeviceSynchronize();
-    if (err != hipSuccess) {
-        std::cerr << "ERROR: Full kernel execution failed: " << hipGetErrorString(err) << std::endl;
-        return;
-    }
-    
-    std::cout << "matmul_transpose_A_kernel completed successfully (debug mode)" << std::endl;
+void launch_matmul_transpose_A(const float* A, const float* B, float* C,
+                               int M, int N, int K) {
+    const size_t total = (size_t)K * (size_t)N;
+    const int threads = 256;
+    const int blocks  = (int)((total + threads - 1) / threads);
+    hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(blocks), dim3(threads), 0, 0,
+                       A, B, C, M, N, K);
+    HIP_CHECK_KERNEL("matmul_transpose_A_kernel");
 }
+
 
 __global__ void matmul_transpose_B_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
     // Use 1D indexing
@@ -976,45 +854,16 @@ __global__ void matmul_transpose_B_kernel(const float* A, const float* B, float*
     C[row * K + col] = sum;
 }
 
-void launch_matmul_transpose_B(const float* A, const float* B, float* C, int M, int N, int K) {
-    std::cout << "Launching matmul_transpose_B_kernel: M=" << M << ", N=" << N << ", K=" << K << std::endl;
-    
-    if (M <= 0 || N <= 0 || K <= 0) {
-        std::cerr << "Error: Invalid matrix dimensions" << std::endl;
-        return;
-    }
-    
-    // Calculate total elements and grid size
-    int total_elements = M * K;
-    int threads_per_block = 256;
-    int blocks = (total_elements + threads_per_block - 1) / threads_per_block;
-    
-    // Limit blocks to prevent issues
-    const int MAX_BLOCKS = 16384;
-    if (blocks > MAX_BLOCKS) {
-        blocks = MAX_BLOCKS;
-        std::cout << "Warning: Large matrix, limiting to " << MAX_BLOCKS << " blocks" << std::endl;
-    }
-    
-    std::cout << "Using 1D grid: " << blocks << " blocks x " << threads_per_block << " threads" << std::endl;
-    std::cout << "Total elements: " << total_elements << std::endl;
-    
-    hipLaunchKernelGGL(matmul_transpose_B_kernel, dim3(blocks), dim3(threads_per_block), 0, 0, A, B, C, M, N, K);
-    
-    hipError_t err = hipGetLastError();
-    if (err != hipSuccess) {
-        std::cerr << "HIP Kernel Launch Error: " << hipGetErrorString(err) << std::endl;
-        exit(1);
-    }
-    
-    err = hipDeviceSynchronize();
-    if (err != hipSuccess) {
-        std::cerr << "HIP Kernel Execution Error: " << hipGetErrorString(err) << std::endl;
-        exit(1);
-    }
-    
-    std::cout << "matmul_transpose_B_kernel completed successfully" << std::endl;
+void launch_matmul_transpose_B(const float* A, const float* B, float* C,
+                               int M, int N, int K) {
+    const size_t total = (size_t)M * (size_t)K;
+    const int threads = 256;
+    const int blocks  = (int)((total + threads - 1) / threads);
+    hipLaunchKernelGGL(matmul_transpose_B_kernel, dim3(blocks), dim3(threads), 0, 0,
+                       A, B, C, M, N, K);
+    HIP_CHECK_KERNEL("matmul_transpose_B_kernel");
 }
+
 
 // Fixed Multi-Head Attention Backward Kernel
 __global__ void multihead_attention_backward_kernel(

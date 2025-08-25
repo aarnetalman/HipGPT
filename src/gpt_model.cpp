@@ -143,7 +143,7 @@ void GPTModel::backward(const int* d_input_ids, const float* d_logits_grad, int 
     // Compute output projection gradient: (last_layer_output)^T @ d_logits_grad
     launch_matmul_transpose_A(
         layer_inputs.back(), d_logits_grad, d_output_proj_grad_,
-        total_tokens, embed_dim_, vocab_size_
+        total_tokens, /*N=*/vocab_size_, /*K=*/embed_dim_
     );
 
     int step_t = 1; // This should be tracked globally for a proper learning rate schedule
