@@ -665,3 +665,30 @@ void launch_sample_from_logits(const float* d_logits, int* d_output_token, int v
     int shared_mem_size = k * (sizeof(float) + sizeof(int));
     hipLaunchKernelGGL(sample_from_logits_kernel, 1, 1, shared_mem_size, 0, d_logits, d_output_token, vocab_size, k, temperature);
 }
+
+__global__ void embedding_backward_kernel(const float* grad_out, const int* token_ids,
+                                          float* grad_token_embed, float* grad_pos_embed,
+                                          int B, int S, int E) {
+    int b = blockIdx.x;
+    int s = blockIdx.y;
+    int e = threadIdx.x;
+
+    if (b >= B || s >= S || e >= E) return;
+
+    int token_id = token_ids[b * S + s];
+    const float* grad = grad_out + (b * S + s) * E + e;
+
+    // Add the gradient to the specific token embedding vector
+    atomicAdd(&grad_token_embed[token_id * E + e], *grad);
+    // Add the gradient to the specific position embedding vector
+    atomicAdd(&grad_pos_embed[s * E + e], *grad);
+}
+
+void launch_embedding_backward(const float* grad_out, const int* token_ids,
+                               float* grad_token_embed, float* grad_pos_embed,
+                               int B, int S, int E) {
+    dim3 blocks(B, S);
+    dim3 threads(E);
+    hipLaunchKernelGGL(embedding_backward_kernel, blocks, threads, 0, 0,
+                       grad_out, token_ids, grad_token_embed, grad_pos_embed, B, S, E);
+}

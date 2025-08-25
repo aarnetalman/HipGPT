@@ -1,6 +1,6 @@
 #include "gpt_model.h"
 #include "tokenizer.h"
-#include "hip_kernels.h" // ADDED: include for the sampling kernel
+#include "hip_kernels.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -24,8 +24,8 @@ int main(int argc, char* argv[]) {
     int num_heads = 4;
     int ff_hidden_dim = 256;
     int num_layers = 2;
-    int top_k = 5; // ADDED: default top-k value
-    float temperature = 1.0f; // ADDED: default temperature value
+    int top_k = 5;
+    float temperature = 1.0f;
 
     // Parse CLI arguments
     for (int i = 1; i < argc; ++i) {

@@ -15,6 +15,11 @@ void launch_backprop_activation(const float* act, const float* grad_out, float* 
 float launch_softmax_loss(const float* logits, float* softmax_out, const int* labels, float* grad_out, int N, int V);
 float launch_accuracy(const float* d_softmax, const int* d_labels, int total_tokens, int vocab_size);
 
+// Embeddings
+void launch_embedding_backward(const float* grad_out, const int* token_ids,
+                               float* grad_token_embed, float* grad_pos_embed,
+                               int B, int S, int E);
+
 // Optimizers
 void launch_sgd_update(float* weights, const float* grads, float lr, int size);
 void launch_adam_update(float* weights, const float* grads, float* m, float* v, float lr, float beta1, float beta2, float epsilon, int t, int size);
