@@ -849,78 +849,89 @@ void launch_matmul_transpose_B(const float* A, const float* B, float* C, int M, 
     std::cout << "matmul_transpose_B_kernel completed successfully (processed " << num_chunks << " chunks)" << std::endl;
 }
 
-
-
-// Fixed matmul_transpose_A_kernel and launch function with correct memory indexing
-
-__global__ void matmul_transpose_A_kernel(
-    const float* A, const float* B, float* C, 
-    int M, int N, int K, int chunk_offset, int chunk_size, bool clear_output
-) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y; // K dimension
-    int col = blockIdx.x * blockDim.x + threadIdx.x; // N dimension
+__global__ void matmul_transpose_A_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y; // K
+    int col = blockIdx.x * blockDim.x + threadIdx.x; // N
     if (row >= K || col >= N) return;
+
+    // Add bounds checking to prevent memory access faults
+    if (row < 0 || row >= K || col < 0 || col >= N) return;
 
     float sum = 0.0f;
     
-    // Process this chunk: from chunk_offset to chunk_offset + chunk_size
-    int end_idx = min(chunk_offset + chunk_size, M);
-    for (int i = chunk_offset; i < end_idx; ++i) {
-        sum += A[i * K + row] * B[i * N + col];
+    // Process in smaller batches within each thread to prevent timeout
+    const int BATCH_SIZE = 32; // Process 32 elements at a time
+    for (int batch_start = 0; batch_start < M; batch_start += BATCH_SIZE) {
+        int batch_end = min(batch_start + BATCH_SIZE, M);
+        
+        for (int i = batch_start; i < batch_end; ++i) {
+            // Add bounds checking for memory access
+            int a_idx = i * K + row;
+            int b_idx = i * N + col;
+            
+            // Ensure indices are within valid bounds
+            if (a_idx >= 0 && a_idx < M * K && b_idx >= 0 && b_idx < M * N) {
+                sum += A[a_idx] * B[b_idx];
+            }
+        }
+        
+        // Add a small break to prevent GPU timeout
+        if (batch_start > 0 && (batch_start % (BATCH_SIZE * 4)) == 0) {
+            __syncthreads(); // Give GPU a chance to breathe
+        }
     }
     
-    if (clear_output) {
-        // First chunk: overwrite
-        C[row * N + col] = sum;
-    } else {
-        // Subsequent chunks: accumulate
-        atomicAdd(&C[row * N + col], sum);
+    // Final bounds check before writing result
+    int c_idx = row * N + col;
+    if (c_idx >= 0 && c_idx < K * N) {
+        C[c_idx] = sum;
     }
 }
 
 void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, int N, int K) {
     std::cout << "Launching matmul_transpose_A_kernel: M=" << M << ", N=" << N << ", K=" << K << std::endl;
     
-    dim3 threads(16, 16);
-    dim3 blocks((N + 15) / 16, (K + 15) / 16);
-    
-    // Process in chunks to avoid timeout
-    int chunk_size = 128;  // Smaller chunk size for safety
-    int num_chunks = (M + chunk_size - 1) / chunk_size;
-    
-    std::cout << "Processing in " << num_chunks << " chunks of size " << chunk_size << std::endl;
-    
-    for (int chunk = 0; chunk < num_chunks; ++chunk) {
-        int chunk_offset = chunk * chunk_size;
-        int current_chunk_size = min(chunk_size, M - chunk_offset);
-        bool is_first_chunk = (chunk == 0);
-        
-        std::cout << "  Processing chunk " << chunk << "/" << num_chunks 
-                  << " (offset=" << chunk_offset << ", size=" << current_chunk_size << ")" << std::endl;
-        
-        hipLaunchKernelGGL(matmul_transpose_A_kernel, blocks, threads, 0, 0, 
-                          A, B, C, M, N, K, chunk_offset, current_chunk_size, is_first_chunk);
-        
-        // Check for errors after each chunk
-        hipError_t err = hipGetLastError();
-        if (err != hipSuccess) {
-            std::cerr << "HIP Kernel Launch Error (matmul_transpose_A_kernel chunk " << chunk << ") at " 
-                      << __FILE__ << ":" << __LINE__ << " - " << hipGetErrorString(err) << std::endl;
-            exit(1);
-        }
-        
-        err = hipDeviceSynchronize();
-        if (err != hipSuccess) {
-            std::cerr << "HIP Kernel Execution Error (matmul_transpose_A_kernel chunk " << chunk << ") at " 
-                      << __FILE__ << ":" << __LINE__ << " - " << hipGetErrorString(err) << std::endl;
-            exit(1);
-        }
-        
-        std::cout << "  Chunk " << chunk << " completed successfully" << std::endl;
+    // Add input validation
+    if (M <= 0 || N <= 0 || K <= 0) {
+        std::cerr << "Error: Invalid matrix dimensions in matmul_transpose_A" << std::endl;
+        return;
     }
     
-    std::cout << "matmul_transpose_A_kernel completed successfully (processed " << num_chunks << " chunks)" << std::endl;
+    // Use smaller thread blocks for large matrices to reduce memory pressure
+    dim3 threads(8, 8);  // Reduced from 16x16 to 8x8
+    dim3 blocks((N + 7) / 8, (K + 7) / 8);
+    
+    // Check if we're going to launch too many blocks
+    int total_blocks = blocks.x * blocks.y;
+    if (total_blocks > 65535) {
+        std::cerr << "Warning: Large number of blocks (" << total_blocks << ") may cause issues" << std::endl;
+        // Adjust block size for very large matrices
+        threads = dim3(16, 16);
+        blocks = dim3((N + 15) / 16, min((K + 15) / 16, 32768));
+    }
+    
+    std::cout << "Using grid: (" << blocks.x << ", " << blocks.y << "), threads: (" 
+              << threads.x << ", " << threads.y << ")" << std::endl;
+    
+    hipLaunchKernelGGL(matmul_transpose_A_kernel, blocks, threads, 0, 0, A, B, C, M, N, K);
+    
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        std::cerr << "HIP Kernel Launch Error (matmul_transpose_A_kernel) at " 
+                  << __FILE__ << ":" << __LINE__ << " - " << hipGetErrorString(err) << std::endl;
+        exit(1);
+    }
+    
+    err = hipDeviceSynchronize();
+    if (err != hipSuccess) {
+        std::cerr << "HIP Kernel Execution Error (matmul_transpose_A_kernel) at " 
+                  << __FILE__ << ":" << __LINE__ << " - " << hipGetErrorString(err) << std::endl;
+        exit(1);
+    }
+    
+    std::cout << "matmul_transpose_A_kernel completed successfully" << std::endl;
 }
+
 
 // Fixed Multi-Head Attention Backward Kernel
 __global__ void multihead_attention_backward_kernel(
