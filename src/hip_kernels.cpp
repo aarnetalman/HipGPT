@@ -69,6 +69,25 @@ void launch_matmul(const float* A, const float* B, float* C, int M, int N, int K
     hipLaunchKernelGGL(matmul_kernel, blocks, threads, 0, 0, A, B, C, M, N, K);
 }
 
+__global__ void matmul_add_bias_kernel(const float* A, const float* B, const float* bias, float* C, int M, int N, int K) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= M || col >= K) return;
+
+    float sum = 0.0f;
+    for (int i = 0; i < N; ++i) {
+        sum += A[row * N + i] * B[i * K + col];
+    }
+    C[row * K + col] = sum + bias[col];
+}
+
+void launch_matmul_add_bias(const float* A, const float* B, const float* bias, float* C, int M, int N, int K) {
+    dim3 threads(16, 16);
+    dim3 blocks((K + 15) / 16, (M + 15) / 16);
+    hipLaunchKernelGGL(matmul_add_bias_kernel, blocks, threads, 0, 0, A, B, bias, C, M, N, K);
+}
+
+
 // ---------------- Matmul Backward with Bias (Corrected) ----------------
 __global__ void matmul_backward_weight_kernel(const float* A_input, const float* B_grad_out, float* C_grad_weight, int M, int N, int K) {
     int row = blockIdx.y * blockDim.y + threadIdx.y; // K

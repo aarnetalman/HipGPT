@@ -396,4 +396,5 @@ void TransformerLayer::load(std::istream& is) {
     hipMemcpy(d_attn_norm_gamma_, h_attn_norm_gamma.data(), h_attn_norm_gamma.size() * sizeof(float), hipMemcpyHostToDevice);
     hipMemcpy(d_attn_norm_beta_, h_attn_norm_beta.data(), h_attn_norm_beta.size() * sizeof(float), hipMemcpyHostToDevice);
     hipMemcpy(d_ffn_norm_gamma_, h_ffn_norm_gamma.data(), h_ffn_norm_gamma.size() * sizeof(float), hipMemcpyHostToDevice);
-    hipMemcpy(d_ffn_norm_beta_, h_ffn_norm_beta.data(), h_ffn_norm_beta.size() * sizeof(float), hipMemcpyHostToDevice)
+    hipMemcpy(d_ffn_norm_beta_, h_ffn_norm_beta.data(), h_ffn_norm_beta.size() * sizeof(float), hipMemcpyHostToDevice);
+}

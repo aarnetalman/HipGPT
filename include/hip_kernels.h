@@ -5,6 +5,7 @@
 
 // Matrix multiplication and its backward pass
 void launch_matmul(const float* A, const float* B, float* C, int M, int N, int K);
+void launch_matmul_add_bias(const float* A, const float* B, const float* bias, float* C, int M, int N, int K);
 void launch_matmul_backward_bias(const float* A_input, const float* B_grad_out, float* C_grad_weight, float* D_grad_bias, int M, int N, int K);
 void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, int N, int K);
 void launch_matmul_transpose_B(const float* A, const float* B, float* C, int M, int N, int K);
