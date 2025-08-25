@@ -297,7 +297,7 @@ void TransformerLayer::backward(const float* d_input, const float* d_grad_output
 
     // 3. Backprop through core multi-head attention mechanism
     // This computes grad_q, grad_k, grad_v and stores them packed in d_grad_qkv_output_
-    launch_multihead_attention_backward(d_grad_attn_output_, d_qkv_output_, d_grad_qkv_output_, batch_size, seq_len, embed_dim_, num_heads_);
+    launch_multihead_attention_backward(d_grad_attn_output_, d_qkv_output_, nullptr, d_grad_qkv_output_, batch_size, seq_len, embed_dim_, num_heads_);
 
     // 4. Backprop through QKV Projection (W_qkv)
     // grad_W_qkv = input^T @ grad_qkv
