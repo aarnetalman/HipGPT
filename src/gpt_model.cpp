@@ -169,7 +169,7 @@ void GPTModel::backward(const int* d_input_ids, const float* d_logits_grad, int 
     launch_embedding_backward(
         d_last_grad, d_input_ids,
         d_grad_token_embedding, d_grad_pos_embedding,
-        batch_size, seq_len, embed_dim_
+        batch_size, seq_len, embed_dim_, vocab_size_
     );
 
     launch_adam_update(
