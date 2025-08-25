@@ -1,3 +1,10 @@
 #!/bin/bash
-# Script to run training
-./train_gpt
+
+# Ensure we are in the script directory
+cd "$(dirname "$0")" || exit
+
+# Go to project root
+cd .. || exit
+
+# Run training with default arguments or override with CLI
+./train_gpt "$@"
