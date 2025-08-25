@@ -785,44 +785,126 @@ void launch_embedding_backward(const float* grad_out, const int* token_ids,
     std::cout << "embedding_backward_kernel completed successfully" << std::endl;
 }
 
-// Kernel for C = A * B^T
 __global__ void matmul_transpose_B_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y; // M dimension
+    int col = blockIdx.x * blockDim.x + threadIdx.x; // K dimension
     if (row >= M || col >= K) return;
 
     float sum = 0.0f;
-    for (int i = 0; i < N; ++i) sum += A[row * N + i] * B[col * N + i]; // B is transposed
-    C[row * K + col] = sum;
+    // Limit iterations to prevent timeout
+    int chunk_size = min(N, 256);
+    for (int i = 0; i < chunk_size && i < N; ++i) {
+        sum += A[row * N + i] * B[col * N + i]; // B is transposed
+    }
+    
+    if (N <= chunk_size) {
+        C[row * K + col] = sum;
+    } else {
+        atomicAdd(&C[row * K + col], sum);
+    }
 }
 
 void launch_matmul_transpose_B(const float* A, const float* B, float* C, int M, int N, int K) {
     std::cout << "Launching matmul_transpose_B_kernel: M=" << M << ", N=" << N << ", K=" << K << std::endl;
+    
+    // Clear output matrix first if N > 256
+    if (N > 256) {
+        hipMemset(C, 0, M * K * sizeof(float));
+    }
+    
     dim3 threads(16, 16);
     dim3 blocks((K + 15) / 16, (M + 15) / 16);
-    hipLaunchKernelGGL(matmul_transpose_B_kernel, blocks, threads, 0, 0, A, B, C, M, N, K);
-    HIP_CHECK_KERNEL("matmul_transpose_B_kernel");
-    std::cout << "matmul_transpose_B_kernel completed successfully" << std::endl;
+    
+    // Launch multiple kernels if N is large
+    int chunk_size = 256;
+    int num_chunks = (N + chunk_size - 1) / chunk_size;
+    
+    for (int chunk = 0; chunk < num_chunks; ++chunk) {
+        int offset = chunk * chunk_size;
+        int current_chunk_size = min(chunk_size, N - offset);
+        
+        hipLaunchKernelGGL(matmul_transpose_B_kernel, blocks, threads, 0, 0, 
+                          A + offset, B + offset, C, M, current_chunk_size, K);
+        
+        // Check for errors after each chunk
+        hipError_t err = hipGetLastError();
+        if (err != hipSuccess) {
+            std::cerr << "HIP Kernel Launch Error (matmul_transpose_B_kernel chunk " << chunk << ") at " 
+                      << __FILE__ << ":" << __LINE__ << " - " << hipGetErrorString(err) << std::endl;
+            exit(1);
+        }
+        
+        err = hipDeviceSynchronize();
+        if (err != hipSuccess) {
+            std::cerr << "HIP Kernel Execution Error (matmul_transpose_B_kernel chunk " << chunk << ") at " 
+                      << __FILE__ << ":" << __LINE__ << " - " << hipGetErrorString(err) << std::endl;
+            exit(1);
+        }
+    }
+    
+    std::cout << "matmul_transpose_B_kernel completed successfully (processed " << num_chunks << " chunks)" << std::endl;
 }
 
-// Kernel for C = A^T * B
 __global__ void matmul_transpose_A_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y; // K
-    int col = blockIdx.x * blockDim.x + threadIdx.x; // N
+    int row = blockIdx.y * blockDim.y + threadIdx.y; // K dimension
+    int col = blockIdx.x * blockDim.x + threadIdx.x; // N dimension
     if (row >= K || col >= N) return;
 
     float sum = 0.0f;
-    for (int i = 0; i < M; ++i) sum += A[i * K + row] * B[i * N + col];
-    C[row * N + col] = sum;
+    // Limit iterations to prevent timeout - process in chunks if needed
+    int chunk_size = min(M, 256);  // Process at most 256 iterations per thread
+    for (int i = 0; i < chunk_size && i < M; ++i) {
+        sum += A[i * K + row] * B[i * N + col];
+    }
+    
+    // If M > chunk_size, we need multiple kernel launches or a different strategy
+    if (M <= chunk_size) {
+        C[row * N + col] = sum;
+    } else {
+        // For large M, use atomic add to accumulate results
+        atomicAdd(&C[row * N + col], sum);
+    }
 }
 
 void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, int N, int K) {
     std::cout << "Launching matmul_transpose_A_kernel: M=" << M << ", N=" << N << ", K=" << K << std::endl;
+    
+    // Clear output matrix first if M > 256 (we'll use multiple kernel calls)
+    if (M > 256) {
+        hipMemset(C, 0, K * N * sizeof(float));
+    }
+    
     dim3 threads(16, 16);
     dim3 blocks((N + 15) / 16, (K + 15) / 16);
-    hipLaunchKernelGGL(matmul_transpose_A_kernel, blocks, threads, 0, 0, A, B, C, M, N, K);
-    HIP_CHECK_KERNEL("matmul_transpose_A_kernel");
-    std::cout << "matmul_transpose_A_kernel completed successfully" << std::endl;
+    
+    // Launch multiple kernels if M is large
+    int chunk_size = 256;
+    int num_chunks = (M + chunk_size - 1) / chunk_size;
+    
+    for (int chunk = 0; chunk < num_chunks; ++chunk) {
+        int offset = chunk * chunk_size;
+        int current_chunk_size = min(chunk_size, M - offset);
+        
+        hipLaunchKernelGGL(matmul_transpose_A_kernel, blocks, threads, 0, 0, 
+                          A + offset * K, B + offset * N, C, current_chunk_size, N, K);
+        
+        // Check for errors after each chunk
+        hipError_t err = hipGetLastError();
+        if (err != hipSuccess) {
+            std::cerr << "HIP Kernel Launch Error (matmul_transpose_A_kernel chunk " << chunk << ") at " 
+                      << __FILE__ << ":" << __LINE__ << " - " << hipGetErrorString(err) << std::endl;
+            exit(1);
+        }
+        
+        err = hipDeviceSynchronize();
+        if (err != hipSuccess) {
+            std::cerr << "HIP Kernel Execution Error (matmul_transpose_A_kernel chunk " << chunk << ") at " 
+                      << __FILE__ << ":" << __LINE__ << " - " << hipGetErrorString(err) << std::endl;
+            exit(1);
+        }
+    }
+    
+    std::cout << "matmul_transpose_A_kernel completed successfully (processed " << num_chunks << " chunks)" << std::endl;
 }
 
 // Fixed Multi-Head Attention Backward Kernel
