@@ -785,44 +785,6 @@ void launch_embedding_backward(const float* grad_out, const int* token_ids,
     std::cout << "embedding_backward_kernel completed successfully" << std::endl;
 }
 
-// Ultra-conservative matmul_transpose_A kernel - each thread does minimal work
-
-__global__ void matmul_transpose_A_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // Each thread processes only a few elements to minimize GPU load
-    const int ELEMENTS_PER_THREAD = 1;  // Ultra-conservative: 1 element per thread
-    
-    int global_idx = idx * ELEMENTS_PER_THREAD;
-    if (global_idx >= K * N) return;
-    
-    int row = global_idx / N;  // K dimension
-    int col = global_idx % N;  // N dimension
-    
-    if (row >= K || col >= N) return;
-    
-    float sum = 0.0f;
-    
-    // Process M dimension with frequent breaks
-    const int MAX_CONSECUTIVE = 4;  // Do at most 4 operations before break
-    
-    for (int i = 0; i < M; i += MAX_CONSECUTIVE) {
-        int end_i = min(i + MAX_CONSECUTIVE, M);
-        
-        // Do a small batch
-        for (int j = i; j < end_i; ++j) {
-            sum += A[j * K + row] * B[j * N + col];
-        }
-        
-        // Force a memory fence to give GPU a break
-        if (i > 0) {
-            __threadfence();
-        }
-    }
-    
-    C[row * N + col] = sum;
-}
-
 void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, int N, int K) {
     std::cout << "Launching matmul_transpose_A_kernel: M=" << M << ", N=" << N << ", K=" << K << std::endl;
     
@@ -831,55 +793,129 @@ void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, 
         return;
     }
     
-    // ULTRA-CONSERVATIVE approach to prevent GPU hang
-    int total_elements = K * N;
+    // === MEMORY DEBUGGING ===
+    std::cout << "=== MEMORY DEBUG ===" << std::endl;
+    std::cout << "Pointer A: " << A << std::endl;
+    std::cout << "Pointer B: " << B << std::endl; 
+    std::cout << "Pointer C: " << C << std::endl;
     
-    // Use tiny blocks and very few blocks per launch
-    int threads_per_block = 32;  // Tiny blocks
-    int max_blocks_per_launch = 512;  // Very few blocks per launch
-    
-    int elements_per_launch = max_blocks_per_launch * threads_per_block;
-    int num_launches = (total_elements + elements_per_launch - 1) / elements_per_launch;
-    
-    std::cout << "ULTRA-SAFE MODE: " << num_launches << " launches, " 
-              << max_blocks_per_launch << " blocks each" << std::endl;
-    
-    // Clear output matrix first
-    hipMemset(C, 0, K * N * sizeof(float));
-    
-    for (int launch = 0; launch < num_launches; ++launch) {
-        int start_element = launch * elements_per_launch;
-        int end_element = min(start_element + elements_per_launch, total_elements);
-        int launch_elements = end_element - start_element;
-        int blocks_this_launch = (launch_elements + threads_per_block - 1) / threads_per_block;
-        
-        std::cout << "  Launch " << (launch + 1) << "/" << num_launches 
-                  << ": elements " << start_element << "-" << (end_element-1) 
-                  << " (" << blocks_this_launch << " blocks)" << std::endl;
-        
-        // Use a simple offset approach - modify the kernel to handle this
-        hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(blocks_this_launch), dim3(threads_per_block), 0, 0, 
-                          A, B, C, M, N, K);
-        
-        hipError_t err = hipGetLastError();
-        if (err != hipSuccess) {
-            std::cerr << "Launch error: " << hipGetErrorString(err) << std::endl;
-            exit(1);
-        }
-        
-        err = hipDeviceSynchronize();
-        if (err != hipSuccess) {
-            std::cerr << "Execution error: " << hipGetErrorString(err) << std::endl;
-            exit(1);
-        }
-        
-        std::cout << "  Launch " << (launch + 1) << " completed successfully" << std::endl;
-        
-        // Small delay between launches to let GPU cool down
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // Check for null pointers
+    if (!A || !B || !C) {
+        std::cerr << "ERROR: One or more pointers are NULL!" << std::endl;
+        return;
     }
     
-    std::cout << "matmul_transpose_A_kernel completed successfully (ultra-safe mode)" << std::endl;
+    // Calculate expected memory sizes
+    size_t size_A = (size_t)M * K * sizeof(float);
+    size_t size_B = (size_t)M * N * sizeof(float);  
+    size_t size_C = (size_t)K * N * sizeof(float);
+    
+    std::cout << "Expected memory sizes:" << std::endl;
+    std::cout << "  A: " << size_A << " bytes (" << size_A/(1024*1024) << " MB)" << std::endl;
+    std::cout << "  B: " << size_B << " bytes (" << size_B/(1024*1024) << " MB)" << std::endl;
+    std::cout << "  C: " << size_C << " bytes (" << size_C/(1024*1024) << " MB)" << std::endl;
+    
+    // Try to check if memory is accessible (this might crash if pointers are bad)
+    std::cout << "Testing memory accessibility..." << std::endl;
+    
+    hipError_t err;
+    
+    // Try a simple memory operation to test if pointers are valid
+    float test_val;
+    err = hipMemcpy(&test_val, A, sizeof(float), hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+        std::cerr << "ERROR: Cannot read from pointer A: " << hipGetErrorString(err) << std::endl;
+        return;
+    } else {
+        std::cout << "SUCCESS: A pointer is readable, first value: " << test_val << std::endl;
+    }
+    
+    err = hipMemcpy(&test_val, B, sizeof(float), hipMemcpyDeviceToHost);
+    if (err != hipSuccess) {
+        std::cerr << "ERROR: Cannot read from pointer B: " << hipGetErrorString(err) << std::endl;
+        return;
+    } else {
+        std::cout << "SUCCESS: B pointer is readable, first value: " << test_val << std::endl;
+    }
+    
+    // Test if C is writable
+    test_val = 123.456f;
+    err = hipMemcpy(C, &test_val, sizeof(float), hipMemcpyHostToDevice);
+    if (err != hipSuccess) {
+        std::cerr << "ERROR: Cannot write to pointer C: " << hipGetErrorString(err) << std::endl;
+        return;
+    } else {
+        std::cout << "SUCCESS: C pointer is writable" << std::endl;
+    }
+    
+    // Check GPU memory info
+    size_t free_mem, total_mem;
+    hipMemGetInfo(&free_mem, &total_mem);
+    size_t used_mem = total_mem - free_mem;
+    
+    std::cout << "GPU Memory Status:" << std::endl;
+    std::cout << "  Total: " << total_mem/(1024*1024) << " MB" << std::endl;
+    std::cout << "  Free:  " << free_mem/(1024*1024) << " MB" << std::endl;
+    std::cout << "  Used:  " << used_mem/(1024*1024) << " MB" << std::endl;
+    
+    size_t total_needed = size_A + size_B + size_C;
+    std::cout << "  Needed for this operation: " << total_needed/(1024*1024) << " MB" << std::endl;
+    
+    if (total_needed > free_mem) {
+        std::cerr << "WARNING: Not enough GPU memory! Need " << total_needed/(1024*1024) 
+                  << " MB but only " << free_mem/(1024*1024) << " MB free" << std::endl;
+    }
+    
+    std::cout << "=== END MEMORY DEBUG ===" << std::endl;
+    
+    // If we get here, try a minimal kernel launch to test
+    std::cout << "Attempting minimal test kernel..." << std::endl;
+    
+    // Launch a tiny test kernel first
+    int test_threads = 32;
+    int test_blocks = 1;
+    
+    hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(test_blocks), dim3(test_threads), 0, 0, A, B, C, M, N, K);
+    
+    err = hipGetLastError();
+    if (err != hipSuccess) {
+        std::cerr << "ERROR: Kernel launch failed: " << hipGetErrorString(err) << std::endl;
+        return;
+    }
+    
+    err = hipDeviceSynchronize();
+    if (err != hipSuccess) {
+        std::cerr << "ERROR: Kernel execution failed: " << hipGetErrorString(err) << std::endl;
+        return;
+    }
+    
+    std::cout << "SUCCESS: Minimal test kernel completed!" << std::endl;
+    
+    // If the test kernel worked, try the full computation with very conservative settings
+    std::cout << "Test successful, proceeding with full computation..." << std::endl;
+    
+    // Use the most conservative settings possible
+    int total_elements = K * N;
+    int threads_per_block = 32;
+    int blocks = min(512, (total_elements + threads_per_block - 1) / threads_per_block);
+    
+    std::cout << "Using ultra-conservative settings: " << blocks << " blocks x " << threads_per_block << " threads" << std::endl;
+    
+    hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(blocks), dim3(threads_per_block), 0, 0, A, B, C, M, N, K);
+    
+    err = hipGetLastError();
+    if (err != hipSuccess) {
+        std::cerr << "ERROR: Full kernel launch failed: " << hipGetErrorString(err) << std::endl;
+        return;
+    }
+    
+    err = hipDeviceSynchronize();
+    if (err != hipSuccess) {
+        std::cerr << "ERROR: Full kernel execution failed: " << hipGetErrorString(err) << std::endl;
+        return;
+    }
+    
+    std::cout << "matmul_transpose_A_kernel completed successfully (debug mode)" << std::endl;
 }
 
 __global__ void matmul_transpose_B_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
