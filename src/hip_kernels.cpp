@@ -4,6 +4,9 @@
 #include <cmath>
 #include <climits> // for UINT_MAX
 
+
+#define MHA_THREADS_PER_BLOCK 256
+
 // Simple XOR-WOW pseudo-random number generator state
 struct xorwow_state {
     unsigned int a, b, c, d;
@@ -180,61 +183,99 @@ void launch_attention_weighted_sum(const float* softmax, const float* V, float* 
     hipLaunchKernelGGL(attention_weighted_sum_kernel, dim3(blocks), dim3(threads), 0, 0, softmax, V, output, B, S, D);
 }
 
-// ---------------- Parallel Multi-Head Attention Kernel ----------------
-// SAFER: one thread **per block**; each block handles exactly one (token, head) pair.
-__global__ void multihead_attention_kernel(const float* Q, const float* K, const float* V, float* output,
+// ---------------- Updated Parallel Multi-Head Attention Kernel ----------------
+__global__ void multihead_attention_kernel(const float* qkv, float* output,
                                            int B, int S, int E, int H) {
-    int token_idx = blockIdx.x * blockDim.x + threadIdx.x;  // == blockIdx.x when blockDim.x == 1
+    // This kernel is now parallelized. Each block handles one (token, head) pair,
+    // and threads within the block cooperate on the calculations.
+    int token_idx = blockIdx.x;
     int head_idx  = blockIdx.y;
+    int t = threadIdx.x; // Thread index within the block
+
     if (token_idx >= B * S) return;
 
     int head_dim = E / H;
     const float scale = 1.0f / sqrtf((float)head_dim);
-
-    const float* q_vec = Q + token_idx * E + head_idx * head_dim;
     const int batch_start_idx = (token_idx / S) * S;
 
-    extern __shared__ float scores[]; // Size S, private to this block
+    // Shared memory for the attention scores for this (token, head) pair.
+    extern __shared__ float scores[]; // Size S
 
-    // 1) Q·K for all positions
-    for (int j = 0; j < S; ++j) {
-        const float* k_vec = K + (batch_start_idx + j) * E + head_idx * head_dim;
+    const float* q_vec = qkv + token_idx * (3 * E)   // Go to the start of the token's data
+                             + head_idx * head_dim; // Go to the start of the head's data in Q
+
+    // Each thread calculates a subset of the S scores.
+    for (int j = t; j < S; j += MHA_THREADS_PER_BLOCK) {
+        const float* k_vec = qkv + (batch_start_idx + j) * (3 * E) // Go to the start of the j-th token in the batch
+                                 + E                               // Offset to the K part
+                                 + head_idx * head_dim;            // Go to the start of the head's data in K
+        
         float dot_product = 0.0f;
-        for (int d = 0; d < head_dim; ++d) dot_product += q_vec[d] * k_vec[d];
+        for (int d = 0; d < head_dim; ++d) {
+            dot_product += q_vec[d] * k_vec[d];
+        }
         scores[j] = dot_product * scale;
     }
 
-    // 2) Softmax
-    float max_score = -1e9f;
-    for (int j = 0; j < S; ++j) if (scores[j] > max_score) max_score = scores[j];
-    float sum_exp = 0.0f;
-    for (int j = 0; j < S; ++j) { scores[j] = expf(scores[j] - max_score); sum_exp += scores[j]; }
-    for (int j = 0; j < S; ++j) scores[j] /= sum_exp;
+    // Synchronize to ensure all scores are written to shared memory.
+    __syncthreads();
 
-    // 3) Weighted sum of V
-    for (int d = 0; d < head_dim; ++d) {
+    // 1. Find max score (serial reduction by thread 0 for simplicity, but effective)
+    __shared__ float max_score;
+    if (t == 0) max_score = -1e9f;
+    __syncthreads(); // ensure max_score is initialized
+    for (int j = t; j < S; j += MHA_THREADS_PER_BLOCK) {
+      atomicMax(&max_score, scores[j]);
+    }
+    __syncthreads(); // ensure all threads see the final max_score
+
+    // 2. Exponentiate and find sum
+    __shared__ float sum_exp;
+    if (t == 0) sum_exp = 0.0f;
+    __syncthreads(); // ensure sum_exp is initialized
+    
+    for (int j = t; j < S; j += MHA_THREADS_PER_BLOCK) {
+        scores[j] = expf(scores[j] - max_score);
+        atomicAdd(&sum_exp, scores[j]);
+    }
+    __syncthreads(); // ensure all threads see the final sum_exp
+
+    // 3. Normalize
+    for (int j = t; j < S; j += MHA_THREADS_PER_BLOCK) {
+        scores[j] /= sum_exp;
+    }
+
+    // Synchronize to ensure softmax calculation is complete.
+    __syncthreads();
+
+    // Each thread calculates a subset of the output vector's dimensions.
+    for (int d = t; d < head_dim; d += MHA_THREADS_PER_BLOCK) {
         float weighted_sum = 0.0f;
         for (int j = 0; j < S; ++j) {
-            const float* v_vec = V + (batch_start_idx + j) * E + head_idx * head_dim;
+            const float* v_vec = qkv + (batch_start_idx + j) * (3 * E) // Go to the start of the j-th token
+                                     + 2 * E                           // Offset to the V part
+                                     + head_idx * head_dim;            // Go to the start of the head's data in V
             weighted_sum += scores[j] * v_vec[d];
         }
+        // Write the final result for this dimension to global memory
         output[token_idx * E + head_idx * head_dim + d] = weighted_sum;
     }
 }
 
+// ---------------- Updated Launcher Function ----------------
 void launch_multihead_attention(const float* d_qkv, float* d_output, int B, int S, int E, int H) {
-    const float* d_Q = d_qkv;
-    const float* d_K = d_qkv + (B * S * E);
-    const float* d_V = d_qkv + 2 * (B * S * E);
-
     int total_tokens = B * S;
-    int threads_per_block = 1; // <— fix: avoid shared-memory races
-    dim3 blocks((total_tokens + threads_per_block - 1) / threads_per_block, H);
-    dim3 threads(threads_per_block);
+    
+    // --- PERFORMANCE IMPROVEMENT: Use multiple threads per block ---
+    dim3 blocks(total_tokens, H);
+    dim3 threads(MHA_THREADS_PER_BLOCK);
+    
+    // Shared memory size is unchanged
     size_t shared_mem_size = S * sizeof(float);
 
+    // Launch the updated, parallelized kernel
     hipLaunchKernelGGL(multihead_attention_kernel, blocks, threads, shared_mem_size, 0,
-        d_Q, d_K, d_V, d_output, B, S, E, H);
+        d_qkv, d_output, B, S, E, H);
 }
 
 __global__ void embedding_lookup_kernel(
@@ -666,109 +707,118 @@ void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, 
     hipLaunchKernelGGL(matmul_transpose_A_kernel, blocks, threads, 0, 0, A, B, C, M, N, K);
 }
 
+
+// ---------------- Updated Parallel Multi-Head Attention Backward Kernel ----------------
 __global__ void multihead_attention_backward_kernel(
     const float* grad_attn_out, // [B*S, E]
-    const float* q_in,          // [B*S, E]
-    const float* k_in,          // [B*S, E]
-    const float* v_in,          // [B*S, E]
-    float* grad_q_out,          // [B*S, E]
-    float* grad_k_out,          // [B*S, E]
-    float* grad_v_out,          // [B*S, E]
+    const float* qkv,           // [B*S, 3*E], forward pass activations
+    float* grad_qkv,            // [B*S, 3*E], output gradients
     int B, int S, int E, int H
 ) {
-    int token_i = blockIdx.x;     // one thread per block
+    int token_i = blockIdx.x;
     int head_h  = blockIdx.y;
+    int t = threadIdx.x;
     if (token_i >= B * S) return;
 
     int head_dim = E / H;
     const float scale = 1.0f / sqrtf((float)head_dim);
     int batch_start_idx = (token_i / S) * S;
 
-    const float* q_vec = q_in + token_i * E + head_h * head_dim;
-    const float* gho   = grad_attn_out + token_i * E + head_h * head_dim;
+    float* grad_q_out = grad_qkv + token_i * (3 * E);
+    float* grad_k_out = grad_qkv + E; // Base pointer for K gradients
+    float* grad_v_out = grad_qkv + 2*E; // Base pointer for V gradients
 
-    // Dynamic shared mem layout: [scores | grad_softmax | grad_scores], each length S
+    const float* gho = grad_attn_out + token_i * E + head_h * head_dim;
+
+    // Shared memory layout: [scores | grad_softmax | grad_scores]
     extern __shared__ unsigned char smem[];
-    float* scores          = reinterpret_cast<float*>(smem);
-    float* grad_softmax    = scores + S;
-    float* grad_scores     = scores + 2 * S;
+    float* scores       = reinterpret_cast<float*>(smem);
+    float* grad_softmax = scores + S;
+    float* grad_scores  = scores + 2 * S;
 
-    // 1) Recompute scores = (Q·K)*scale
-    for (int j = 0; j < S; ++j) {
-        const float* k_vec = k_in + (batch_start_idx + j) * E + head_h * head_dim;
+    // --- STEP 1: Recompute forward scores (Parallelized) ---
+    const float* q_vec = qkv + token_i * (3 * E) + head_h * head_dim;
+    for (int j = t; j < S; j += MHA_THREADS_PER_BLOCK) {
+        const float* k_vec = qkv + (batch_start_idx + j) * (3 * E) + E + head_h * head_dim;
         float dot = 0.0f;
         for (int d = 0; d < head_dim; ++d) dot += q_vec[d] * k_vec[d];
         scores[j] = dot * scale;
     }
+    __syncthreads();
 
-    // 2) Softmax(scores)
-    float max_s = -1e9f;
-    for (int j = 0; j < S; ++j) if (scores[j] > max_s) max_s = scores[j];
-    float denom = 0.0f;
-    for (int j = 0; j < S; ++j) { scores[j] = expf(scores[j] - max_s); denom += scores[j]; }
-    for (int j = 0; j < S; ++j) scores[j] /= denom;
+    // --- STEP 2: Recompute Softmax(scores) (Parallelized) ---
+    __shared__ float max_s;
+    if (t == 0) max_s = -1e9f;
+    __syncthreads();
+    for (int j = t; j < S; j += MHA_THREADS_PER_BLOCK) atomicMax(&max_s, scores[j]);
+    __syncthreads();
 
-    // 3) grad wrt softmax and V
-    for (int j = 0; j < S; ++j) {
-        const float* v_vec = v_in + (batch_start_idx + j) * E + head_h * head_dim;
+    __shared__ float denom;
+    if (t == 0) denom = 0.0f;
+    __syncthreads();
+    for (int j = t; j < S; j += MHA_THREADS_PER_BLOCK) {
+        scores[j] = expf(scores[j] - max_s);
+        atomicAdd(&denom, scores[j]);
+    }
+    __syncthreads();
+    for (int j = t; j < S; j += MHA_THREADS_PER_BLOCK) scores[j] /= denom;
+    __syncthreads();
+
+    // --- STEP 3: Grad wrt softmax output and V (Parallelized) ---
+    for (int j = t; j < S; j += MHA_THREADS_PER_BLOCK) {
+        const float* v_vec = qkv + (batch_start_idx + j) * (3 * E) + 2 * E + head_h * head_dim;
         float g = 0.0f;
         for (int d = 0; d < head_dim; ++d) {
             g += gho[d] * v_vec[d];
-            atomicAdd(&grad_v_out[(batch_start_idx + j) * E + head_h * head_dim + d],
-                      scores[j] * gho[d]);
+            // Accumulate gradient for V
+            atomicAdd(&grad_v_out[(batch_start_idx + j) * (3 * E) + head_h * head_dim + d], scores[j] * gho[d]);
         }
         grad_softmax[j] = g;
     }
+    __syncthreads();
 
-    // 4) grad wrt scores (softmax backward)
-    float sum_term = 0.0f;
-    for (int j = 0; j < S; ++j) sum_term += grad_softmax[j] * scores[j];
-    for (int j = 0; j < S; ++j) grad_scores[j] = (grad_softmax[j] - sum_term) * scores[j];
+    // --- STEP 4: Grad wrt scores (softmax backward) (Parallelized) ---
+    __shared__ float sum_term;
+    if (t == 0) sum_term = 0.0f;
+    __syncthreads();
+    for (int j = t; j < S; j += MHA_THREADS_PER_BLOCK) atomicAdd(&sum_term, grad_softmax[j] * scores[j]);
+    __syncthreads();
+    for (int j = t; j < S; j += MHA_THREADS_PER_BLOCK) grad_scores[j] = (grad_softmax[j] - sum_term) * scores[j];
+    __syncthreads();
 
-    // 5) grad wrt Q and K
-    //    Q_d gradient computed without fixed-size buffer
-    for (int d = 0; d < head_dim; ++d) {
+    // --- STEP 5: Grad wrt Q and K (Parallelized) ---
+    for (int d = t; d < head_dim; d += MHA_THREADS_PER_BLOCK) {
         float acc_qd = 0.0f;
         for (int j = 0; j < S; ++j) {
-            const float* k_vec = k_in + (batch_start_idx + j) * E + head_h * head_dim;
+            const float* k_vec = qkv + (batch_start_idx + j) * (3 * E) + E + head_h * head_dim;
             float g = grad_scores[j] * scale;
             acc_qd += g * k_vec[d];
-            atomicAdd(&grad_k_out[(batch_start_idx + j) * E + head_h * head_dim + d],
-                      g * q_vec[d]);
+            // Accumulate gradient for K
+            atomicAdd(&grad_k_out[(batch_start_idx + j) * (3 * E) + head_h * head_dim + d], g * q_vec[d]);
         }
-        grad_q_out[token_i * E + head_h * head_dim + d] = acc_qd;
+        // Write gradient for Q
+        grad_q_out[head_h * head_dim + d] = acc_qd;
     }
 }
 
 
+// ---------------- Updated Launcher Function for Backward Pass ----------------
 void launch_multihead_attention_backward(
     const float* d_grad_attn_output, const float* d_qkv, const float* /*d_softmax*/,
     float* d_grad_qkv, int B, int S, int E, int H
 ) {
-    // Calculate pointers to the separate Q, K, V sections of the input tensor
-    const float* d_Q = d_qkv;
-    const float* d_K = d_qkv + ((size_t)B * S * E);
-    const float* d_V = d_qkv + 2 * ((size_t)B * S * E);
-
-    // Calculate pointers to the separate gradient sections of the output tensor
-    float* d_grad_Q = d_grad_qkv;
-    float* d_grad_K = d_grad_qkv + ((size_t)B * S * E);
-    float* d_grad_V = d_grad_qkv + 2 * ((size_t)B * S * E);
-
     // Zero out the gradient buffer before accumulating gradients
     hipMemset(d_grad_qkv, 0, (size_t)B * S * E * 3 * sizeof(float));
 
     int total_tokens = B * S;
-    int threads_per_block = 1; // Use one thread per block for stability
     
-    // Grid is 2D: (total_tokens, heads)
     dim3 blocks(total_tokens, H);
-    dim3 threads(threads_per_block);
+    dim3 threads(MHA_THREADS_PER_BLOCK);
     
-    // (scores, grad_softmax, grad_scores)
+    // Shared memory for 3 float arrays of size S: (scores, grad_softmax, grad_scores)
     size_t shared_mem_size = 3 * S * sizeof(float);
 
-    // Launch the backward kernel with the corrected shared memory size
+    // Launch the updated, parallelized kernel
     hipLaunchKernelGGL(multihead_attention_backward_kernel, blocks, threads, shared_mem_size, 0,
-        d_grad_attn_output, d_Q, d_K, d_V, d_grad_Q, d_grad_K, d_grad_V, B, S, E, H);
+        d_grad_attn_output, d_qkv, d_grad_qkv, B, S, E, H);
 }
