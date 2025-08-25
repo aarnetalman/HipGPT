@@ -785,28 +785,37 @@ void launch_embedding_backward(const float* grad_out, const int* token_ids,
     std::cout << "embedding_backward_kernel completed successfully" << std::endl;
 }
 
-// Replace the transpose kernels with these clean 1D versions:
-
 __global__ void matmul_transpose_A_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
-    // Use 1D indexing to avoid massive grid sizes
+    // Each thread works on one output element, but processes M dimension cooperatively
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
-    // Calculate total elements we need to process
     int total_elements = K * N;
     if (idx >= total_elements) return;
     
-    // Convert 1D index to 2D coordinates
+    // Convert to 2D coordinates
     int row = idx / N;  // K dimension
     int col = idx % N;  // N dimension
     
-    // Double-check bounds
     if (row >= K || col >= N) return;
 
     float sum = 0.0f;
     
-    // Compute A^T * B: C[row,col] = sum over i of A[i,row] * B[i,col]
-    for (int i = 0; i < M; ++i) {
-        sum += A[i * K + row] * B[i * N + col];
+    // Process M dimension in small chunks to prevent GPU timeout
+    const int CHUNK_SIZE = 16;  // Process 16 elements at a time
+    
+    for (int chunk_start = 0; chunk_start < M; chunk_start += CHUNK_SIZE) {
+        int chunk_end = min(chunk_start + CHUNK_SIZE, M);
+        
+        // Process this chunk
+        for (int i = chunk_start; i < chunk_end; ++i) {
+            sum += A[i * K + row] * B[i * N + col];
+        }
+        
+        // Give GPU a breather every few chunks
+        if ((chunk_start > 0) && (chunk_start % (CHUNK_SIZE * 4) == 0)) {
+            // Force some memory operations to prevent compiler optimization that might cause hangs
+            __syncthreads();
+        }
     }
     
     C[row * N + col] = sum;
@@ -820,33 +829,67 @@ void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, 
         return;
     }
     
-    // Calculate total elements and grid size
     int total_elements = K * N;
-    int threads_per_block = 256;
+    
+    // Use smaller blocks to reduce resource pressure per SM
+    int threads_per_block = 128;  // Reduced from 256
     int blocks = (total_elements + threads_per_block - 1) / threads_per_block;
     
-    // Limit blocks to prevent issues (conservative)
-    const int MAX_BLOCKS = 16384;  // Even more conservative
+    // Very conservative limit for this problematic kernel
+    const int MAX_BLOCKS = 8192;
     if (blocks > MAX_BLOCKS) {
-        blocks = MAX_BLOCKS;
-        std::cout << "Warning: Large matrix, limiting to " << MAX_BLOCKS << " blocks" << std::endl;
-    }
-    
-    std::cout << "Using 1D grid: " << blocks << " blocks x " << threads_per_block << " threads" << std::endl;
-    std::cout << "Total elements: " << total_elements << std::endl;
-    
-    hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(blocks), dim3(threads_per_block), 0, 0, A, B, C, M, N, K);
-    
-    hipError_t err = hipGetLastError();
-    if (err != hipSuccess) {
-        std::cerr << "HIP Kernel Launch Error: " << hipGetErrorString(err) << std::endl;
-        exit(1);
-    }
-    
-    err = hipDeviceSynchronize();
-    if (err != hipSuccess) {
-        std::cerr << "HIP Kernel Execution Error: " << hipGetErrorString(err) << std::endl;
-        exit(1);
+        // Process in multiple kernel launches
+        std::cout << "Large matrix detected, using multiple kernel launches" << std::endl;
+        
+        int elements_per_launch = MAX_BLOCKS * threads_per_block;
+        int num_launches = (total_elements + elements_per_launch - 1) / elements_per_launch;
+        
+        for (int launch = 0; launch < num_launches; ++launch) {
+            int start_element = launch * elements_per_launch;
+            int end_element = min(start_element + elements_per_launch, total_elements);
+            int launch_elements = end_element - start_element;
+            int launch_blocks = (launch_elements + threads_per_block - 1) / threads_per_block;
+            
+            std::cout << "  Launch " << (launch + 1) << "/" << num_launches 
+                      << ": elements " << start_element << "-" << (end_element - 1) 
+                      << " (" << launch_blocks << " blocks)" << std::endl;
+            
+            // Offset pointers for this launch
+            hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(launch_blocks), dim3(threads_per_block), 0, 0, 
+                              A, B, C, M, N, K);
+            
+            // Check for errors immediately after each launch
+            hipError_t err = hipGetLastError();
+            if (err != hipSuccess) {
+                std::cerr << "Kernel launch error in launch " << launch << ": " << hipGetErrorString(err) << std::endl;
+                exit(1);
+            }
+            
+            err = hipDeviceSynchronize();
+            if (err != hipSuccess) {
+                std::cerr << "Kernel execution error in launch " << launch << ": " << hipGetErrorString(err) << std::endl;
+                exit(1);
+            }
+            
+            std::cout << "  Launch " << (launch + 1) << " completed successfully" << std::endl;
+        }
+    } else {
+        std::cout << "Using single launch: " << blocks << " blocks x " << threads_per_block << " threads" << std::endl;
+        std::cout << "Total elements: " << total_elements << std::endl;
+        
+        hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(blocks), dim3(threads_per_block), 0, 0, A, B, C, M, N, K);
+        
+        hipError_t err = hipGetLastError();
+        if (err != hipSuccess) {
+            std::cerr << "HIP Kernel Launch Error: " << hipGetErrorString(err) << std::endl;
+            exit(1);
+        }
+        
+        err = hipDeviceSynchronize();
+        if (err != hipSuccess) {
+            std::cerr << "HIP Kernel Execution Error: " << hipGetErrorString(err) << std::endl;
+            exit(1);
+        }
     }
     
     std::cout << "matmul_transpose_A_kernel completed successfully" << std::endl;
