@@ -43,6 +43,8 @@ int main(int argc, char** argv) {
     std::string tokenizer_path = args.count("--tokenizer-path") ? args["--tokenizer-path"] : "tokenizer.json";
     std::string tokens_path = args.count("--tokens-path") ? args["--tokens-path"] : "tokens.bin";
     bool force_reset = args.count("--reset");
+    int log_every = args.count("--log-every") ? std::stoi(args["--log-every"]) : 50;
+
 
     // ---- Tokenizer + Dataset ----
     Tokenizer tokenizer(vocab_size_limit);
@@ -138,9 +140,12 @@ int main(int argc, char** argv) {
         float ms = 0.0f;
         hipEventElapsedTime(&ms, start, stop);
 
-        std::cout << "[Step " << step << "] Loss: " << loss
-                  << " | Accuracy: " << acc * 100.0f << "%"
-                  << " | Time: " << ms << " ms" << std::endl;
+        if ((step % log_every) == 0 || step == num_steps - 1) {
+            std::cout << "[Step " << step << "] Loss: " << loss
+                    << " | Accuracy: " << acc * 100.0f << "%"
+                    << " | Time: " << ms << " ms" << std::endl;
+        }
+
     }
 
     hipEventDestroy(start);

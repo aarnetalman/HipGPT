@@ -481,48 +481,99 @@ void launch_layer_norm_forward(const float* input, float* output, const float* g
     hipLaunchKernelGGL(layernorm_forward_kernel, dim3(blocks), dim3(threads), 0, 0, input, output, gamma, beta, N, E);
 }
 
-// Layer Normalization Backward
-__global__ void layernorm_backward_kernel(const float* grad_output, const float* input, float* grad_input, const float* gamma, float* grad_gamma, float* grad_beta, int N, int E) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= N) return;
+__global__ void layernorm_backward_kernel(
+    const float* __restrict__ grad_output, // [N,E]
+    const float* __restrict__ input,       // [N,E]
+    float* __restrict__ grad_input,        // [N,E]
+    const float* __restrict__ gamma,       // [E]
+    float* __restrict__ grad_gamma,        // [E]
+    float* __restrict__ grad_beta,         // [E]
+    int N, int E, float eps=1e-5f)
+{
+    int n = blockIdx.x;         // one row per block
+    int e = threadIdx.x;        // one feature per thread
+    if (n >= N || e >= E) return;
 
-    float mean = 0.0f;
-    for (int j = 0; j < E; ++j) mean += input[i * E + j];
-    mean /= E;
+    extern __shared__ float shm[]; // 3*E floats: xhat, dy, tmp
+    float* xhat = shm;
+    float* dy_g = shm + E;
+    float* buf  = shm + 2*E;
 
-    float variance = 0.0f;
-    for (int j = 0; j < E; ++j) {
-        float diff = input[i * E + j] - mean;
-        variance += diff * diff;
-    }
-    variance /= E;
-    float stddev = sqrtf(variance + 1e-5f);
+    // compute mean/var across E
+    float x = input[n*E + e];
+    float go = grad_output[n*E + e];
 
-    float sum_grad_norm_input = 0.0f;
-    for (int j = 0; j < E; ++j) {
-        sum_grad_norm_input += grad_output[i * E + j] * (input[i * E + j] - mean) / stddev;
+    // parallel reduce mean
+    buf[e] = x;
+    __syncthreads();
+    // reduction
+    for (int stride=E/2; stride>0; stride>>=1) {
+        if (e < stride) buf[e] += buf[e+stride];
+        __syncthreads();
     }
-    
-    float sum_grad_norm_input_x = 0.0f;
-    for (int j = 0; j < E; ++j) {
-        sum_grad_norm_input_x += grad_output[i * E + j] * gamma[j] * (-1.0f / (stddev * stddev)) * (input[i * E + j] - mean);
-    }
+    float mean = buf[0] / E;
 
-    for (int j = 0; j < E; ++j) {
-        float norm_input = (input[i * E + j] - mean) / stddev;
-        atomicAdd(&grad_gamma[j], grad_output[i * E + j] * norm_input);
-        atomicAdd(&grad_beta[j], grad_output[i * E + j]);
-        grad_input[i * E + j] = (gamma[j] / stddev) * grad_output[i * E + j]
-                              - (gamma[j] / (E * stddev)) * sum_grad_norm_input
-                              - (norm_input / (E * stddev)) * sum_grad_norm_input_x;
+    // variance
+    float xm = x - mean;
+    buf[e] = xm * xm;
+    __syncthreads();
+    for (int stride=E/2; stride>0; stride>>=1) {
+        if (e < stride) buf[e] += buf[e+stride];
+        __syncthreads();
     }
+    float var = buf[0] / E;
+    float inv_std = rsqrtf(var + eps);
+
+    // stash xhat and dy*gamma for second reductions
+    float g = gamma[e];
+    float xh = xm * inv_std;
+    xhat[e] = xh;
+    dy_g[e] = go * g;
+    __syncthreads();
+
+    // sum(dy*gamma) and sum(dy*gamma*xhat)
+    buf[e] = dy_g[e];
+    __syncthreads();
+    for (int stride=E/2; stride>0; stride>>=1) {
+        if (e < stride) buf[e] += buf[e+stride];
+        __syncthreads();
+    }
+    float sum1 = buf[0]; // ∑ dy*gamma
+
+    buf[e] = dy_g[e] * xhat[e];
+    __syncthreads();
+    for (int stride=E/2; stride>0; stride>>=1) {
+        if (e < stride) buf[e] += buf[e+stride];
+        __syncthreads();
+    }
+    float sum2 = buf[0]; // ∑ dy*gamma*xhat
+
+    // dx
+    float dx = (dy_g[e] - sum1 / E - xhat[e] * sum2 / E) * inv_std;
+    grad_input[n*E + e] = dx;
+
+    // dgamma/dbeta (atomics across N)
+    atomicAdd(&grad_gamma[e], go * xh);
+    atomicAdd(&grad_beta[e],  go);
 }
 
-void launch_layer_norm_backward(const float* grad_output, const float* input, float* grad_input, const float* gamma, float* grad_gamma, float* grad_beta, int N, int E) {
-    int threads = 256;
-    int blocks = (N + threads - 1) / threads;
-    hipLaunchKernelGGL(layernorm_backward_kernel, dim3(blocks), dim3(threads), 0, 0, grad_output, input, grad_input, gamma, grad_gamma, grad_beta, N, E);
+void launch_layer_norm_backward(const float* grad_output, const float* input,
+                                float* grad_input, const float* gamma,
+                                float* grad_gamma, float* grad_beta, int N, int E)
+{
+    // zero the parameter grads before accumulate
+    HIP_CHECK(hipMemset(grad_gamma, 0, E*sizeof(float)));
+    HIP_CHECK(hipMemset(grad_beta,  0, E*sizeof(float)));
+
+    dim3 blocks(N);
+    int threads = 1;
+    while (threads < E && threads < 1024) threads <<= 1; // pow2 for simple reductions
+    size_t shmem = (size_t) (3 * threads) * sizeof(float);
+    hipLaunchKernelGGL(layernorm_backward_kernel, blocks, dim3(threads), shmem, 0,
+                       grad_output, input, grad_input, gamma, grad_gamma, grad_beta, N, E, 1e-5f);
+    HIP_CHECK_KERNEL("layernorm_backward_kernel_ref");
 }
+
 
 // Dropout Forward
 __global__ void dropout_forward_kernel(const float* input, float* output, float* mask, float p, int N, int E) {
