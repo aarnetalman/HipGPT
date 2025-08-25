@@ -55,8 +55,8 @@ The project uses CMake to handle the build process.
 ```bash
 mkdir build
 cd build
-cmake ..
-make -j
+cmake .. -DCMAKE_CXX_COMPILER=/usr/bin/hipcc
+make
 ```
 
 This will create two executables in the `build/` directory: `train_gpt` and `generate`.
