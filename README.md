@@ -1,8 +1,8 @@
-# HIP-GPT: A GPT-2 Implementation in C++ and HIP
+# HipGPT: A GPT-2 Implementation in C++ and HIP
 
 [](https://opensource.org/licenses/MIT)
 
-HIP-GPT is a lightweight, implementation of a GPT-2 style transformer model written from scratch in C++ and accelerated using AMD's **[HIP API](https://rocm.docs.amd.com/en/latest/understand/hip_api/hip_api.html)** for ROCm-enabled GPUs. This project includes all the necessary components for a modern language model: a custom BPE tokenizer, a transformer-based GPT model, and high-performance GPU kernels for training and inference.
+HipGPT is a lightweight, implementation of a GPT-2 style transformer model written from scratch in C++ and accelerated using AMD's **[HIP API](https://rocm.docs.amd.com/en/latest/understand/hip_api/hip_api.html)** for ROCm-enabled GPUs. This project includes all the necessary components for a modern language model: a custom BPE tokenizer, a transformer-based GPT model, and high-performance GPU kernels for training and inference.
 
 The entire project is self-contained and designed to be a clear, understandable guide to the inner workings of large language models.
 
@@ -33,8 +33,8 @@ Follow these steps to download the dataset, build the executables, and start usi
 ### **2. Clone the Repository**
 
 ```bash
-git clone git@github.com:aarnetalman/HIP_GPT.git
-cd HIP_GPT
+git git@github.com:aarnetalman/HipGPT.git
+cd HipGPT
 ```
 
 ### **3. Download the Dataset**
@@ -147,17 +147,6 @@ The project is organized into `src` and `include` directories for a clean separa
   * **BPE Tokenizer**: The `Tokenizer` class is responsible for converting raw text into a sequence of integer token IDs that the model can understand. It can be trained from scratch on a corpus to learn a vocabulary of sub-word units.
   * **Transformer Layer**: The `TransformerLayer` is the core building block of the model. It contains a multi-head self-attention mechanism and a position-wise feed-forward network, with residual connections and layer normalization.
   * **GPT Model**: The `GPTModel` class assembles the entire network. It manages the token and positional embeddings, stacks multiple `TransformerLayer` instances, and adds a final linear layer to produce output logits over the vocabulary.
-
------
-
-## Future Work
-
-This project serves as a strong foundation. Future improvements could include:
-
-  * **KV Cache**: Implement a Key-Value cache for the attention mechanism to dramatically speed up text generation.
-  * **Kernel Optimization**: Further optimize HIP kernels using techniques like tiling and shared memory for matrix multiplication.
-  * **Advanced Sampling**: Add more sophisticated sampling strategies like nucleus sampling (top-p).
-  * **Mixed-Precision Training**: Support for training with `fp16` precision to reduce memory usage and improve performance.
 
 -----
 
