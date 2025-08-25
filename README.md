@@ -120,7 +120,7 @@ The project is organized into `src` and `include` directories for a clean separa
 ├── data/                  # Data files (e.g., data.txt)
 ├── scripts/               # Helper scripts
 │   ├── download_wikitext.sh
-│   ├── run_train.sh
+│   └── run_train.sh
 ├── include/               # All public header files (.h)
 │   ├── gpt_model.h
 │   ├── hip_kernels.h
