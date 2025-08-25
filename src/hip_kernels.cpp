@@ -2,7 +2,27 @@
 #include "hip_kernels.h"
 #include <hip/hip_runtime.h>
 #include <cmath>
-#include <hip/hip_ext.h> // for hiprand functions
+
+// Simple XOR-WOW pseudo-random number generator state
+struct xorwow_state {
+    unsigned int a, b, c, d;
+    unsigned int counter;
+};
+
+// The random number generation function for the GPU
+__device__ unsigned int xorwow(struct xorwow_state *state) {
+    unsigned int t = state->d;
+    unsigned int s = state->a;
+    state->d = state->c;
+    state->c = state->b;
+    state->b = s;
+    t ^= t >> 2;
+    t ^= t << 1;
+    t ^= s ^ (s << 4);
+    state->a = t;
+    state->counter++;
+    return t + state->counter;
+}
 
 // ---------------- Mean Pooling ----------------
 __global__ void mean_pool_kernel_optimized(const float* input, float* output, int B, int L, int D) {
@@ -513,7 +533,18 @@ __global__ void dropout_forward_kernel(const float* input, float* output, float*
     unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N * E) return;
 
-    if (hipRand() < p) {
+    // Create a state seeded with the thread's unique ID
+    xorwow_state rng_state;
+    rng_state.a = idx + 1;
+    rng_state.b = blockIdx.x + 1;
+    rng_state.c = threadIdx.x + 1;
+    rng_state.d = (idx * blockIdx.x) + 1;
+    rng_state.counter = 0;
+
+    // Generate a random float between 0.0 and 1.0
+    float rand_val = (float)xorwow(&rng_state) / (float)UINT_MAX;
+
+    if (rand_val < p) { // Use the new random value
         output[idx] = 0.0f;
         mask[idx] = 0.0f;
     } else {
@@ -543,7 +574,7 @@ __global__ void dropout_backward_kernel(const float* grad_output, const float* m
 void launch_dropout_backward(const float* grad_output, const float* mask, float p, float* grad_input, int N, int E) {
     int threads = 256;
     int blocks = (N * E + threads - 1) / threads;
-    hipLaunchKernelGGL(dropout_backward_kernel, dim3(blocks), dim3(threads), 0, 0, grad_output, mask, p, N, E);
+    hipLaunchKernelGGL(dropout_backward_kernel, dim3(blocks), dim3(threads), 0, 0, grad_output, mask, p, grad_input, N, E);
 }
 
 // Adam Optimizer
@@ -640,7 +671,13 @@ __global__ void sample_from_logits_kernel(const float* logits, int* output_token
     }
     
     // Perform cumulative sampling from top-k tokens
-    float r = hipRand() / (float)RAND_MAX;
+    xorwow_state rng_state;
+    rng_state.a = 12345; // Can use any non-zero seed
+    rng_state.b = 67890;
+    rng_state.c = 13579;
+    rng_state.d = 24680;
+    rng_state.counter = 0;
+    float r = (float)xorwow(&rng_state) / (float)UINT_MAX;
     float cumulative_prob = 0.0f;
     int selected_token = -1;
     
