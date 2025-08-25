@@ -2,15 +2,13 @@
 
 set -e
 
-# Use a more robust way to get to the project root
-PROJECT_ROOT="$(dirname "$(dirname "$(readlink -f "$0")")")"
-DATA_DIR="$PROJECT_ROOT/data"
+cd "$(dirname "$0")/.." || exit
+DATA_DIR="data"
 
 mkdir -p "$DATA_DIR"
 cd "$DATA_DIR" || exit
 
-# URLs
-BASE_URL="https://huggingface.co/datasets/wikitext/resolve/main/wikitext-2-raw-v1"
+BASE_URL="https://huggingface.co/datasets/Salesforce/wikitext/raw/main/wikitext-2-raw-v1"
 FILES=("wiki.train.raw" "wiki.valid.raw" "wiki.test.raw")
 
 # Download if not already present
