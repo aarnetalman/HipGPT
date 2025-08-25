@@ -785,6 +785,39 @@ void launch_embedding_backward(const float* grad_out, const int* token_ids,
     std::cout << "embedding_backward_kernel completed successfully" << std::endl;
 }
 
+// Keep the kernel function - only the launch function was replaced above
+__global__ void matmul_transpose_A_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    int total_elements = K * N;
+    if (idx >= total_elements) return;
+    
+    int row = idx / N;  // K dimension
+    int col = idx % N;  // N dimension
+    
+    if (row >= K || col >= N) return;
+
+    float sum = 0.0f;
+    
+    // Process M dimension in small chunks to prevent GPU timeout
+    const int CHUNK_SIZE = 4;  // Very small chunks for ultra-safety
+    
+    for (int chunk_start = 0; chunk_start < M; chunk_start += CHUNK_SIZE) {
+        int chunk_end = min(chunk_start + CHUNK_SIZE, M);
+        
+        for (int i = chunk_start; i < chunk_end; ++i) {
+            sum += A[i * K + row] * B[i * N + col];
+        }
+        
+        // Give GPU frequent breaks
+        if ((chunk_start > 0) && (chunk_start % (CHUNK_SIZE * 2) == 0)) {
+            __threadfence();
+        }
+    }
+    
+    C[row * N + col] = sum;
+}
+
 void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, int N, int K) {
     std::cout << "Launching matmul_transpose_A_kernel: M=" << M << ", N=" << N << ", K=" << K << std::endl;
     
@@ -850,7 +883,7 @@ void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, 
     
     // Check GPU memory info
     size_t free_mem, total_mem;
-    hipMemGetInfo(&free_mem, &total_mem);
+    HIP_CHECK(hipMemGetInfo(&free_mem, &total_mem));
     size_t used_mem = total_mem - free_mem;
     
     std::cout << "GPU Memory Status:" << std::endl;
