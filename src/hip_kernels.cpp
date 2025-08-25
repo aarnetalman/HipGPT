@@ -871,30 +871,36 @@ __global__ void multihead_attention_backward_kernel(
     }
 }
 
-
 void launch_multihead_attention_backward(
-    const float* d_grad_attn_output, const float* d_qkv,
+    const float* d_grad_attn_output, const float* d_qkv, const float* d_softmax,
     float* d_grad_qkv, int B, int S, int E, int H
 ) {
-    const float* d_Q = d_qkv;
-    const float* d_K = d_qkv + (B * S * E);
-    const float* d_V = d_qkv + 2 * (B * S * E);
+    // Note: The d_softmax parameter is unused as the kernel recomputes it,
+    // which is why we passed nullptr in the calling function.
 
+    // Calculate pointers to the separate Q, K, V sections of the input tensor
+    const float* d_Q = d_qkv;
+    const float* d_K = d_qkv + ((size_t)B * S * E);
+    const float* d_V = d_qkv + 2 * ((size_t)B * S * E);
+
+    // Calculate pointers to the separate gradient sections of the output tensor
     float* d_grad_Q = d_grad_qkv;
-    float* d_grad_K = d_grad_qkv + (B * S * E);
-    float* d_grad_V = d_grad_qkv + 2 * (B * S * E);
+    float* d_grad_K = d_grad_qkv + ((size_t)B * S * E);
+    float* d_grad_V = d_grad_qkv + 2 * ((size_t)B * S * E);
     
-    // Zero out the gradient buffers before accumulating
+    // Zero out the gradient buffers before accumulating gradients with atomicAdds
     hipMemset(d_grad_qkv, 0, (size_t)B * S * E * 3 * sizeof(float));
 
     int total_tokens = B * S;
     int threads_per_block = 256;
+    // The grid is 2D: one dimension for tokens, the other for attention heads
     dim3 blocks((total_tokens + threads_per_block - 1) / threads_per_block, H);
     dim3 threads(threads_per_block);
     
-    // Shared memory for re-computing softmax scores
+    // Define the shared memory size needed by the kernel for recomputing softmax scores
     size_t shared_mem_size = S * sizeof(float);
 
+    // Launch the backward kernel
     hipLaunchKernelGGL(multihead_attention_backward_kernel, blocks, threads, shared_mem_size, 0,
         d_grad_attn_output, d_Q, d_K, d_V, d_grad_Q, d_grad_K, d_grad_V, B, S, E, H);
 }
