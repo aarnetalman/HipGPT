@@ -785,24 +785,26 @@ void launch_embedding_backward(const float* grad_out, const int* token_ids,
     std::cout << "embedding_backward_kernel completed successfully" << std::endl;
 }
 
-// Replace with a much simpler 1D grid approach that avoids the massive grid issue
+// Replace the transpose kernels with these clean 1D versions:
 
 __global__ void matmul_transpose_A_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
     // Use 1D indexing to avoid massive grid sizes
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
-    // Calculate 2D coordinates from 1D index
+    // Calculate total elements we need to process
     int total_elements = K * N;
     if (idx >= total_elements) return;
     
+    // Convert 1D index to 2D coordinates
     int row = idx / N;  // K dimension
     int col = idx % N;  // N dimension
     
+    // Double-check bounds
     if (row >= K || col >= N) return;
 
     float sum = 0.0f;
     
-    // Simple matrix multiplication: C[row,col] = sum(A[i,row] * B[i,col]) for i in M
+    // Compute A^T * B: C[row,col] = sum over i of A[i,row] * B[i,col]
     for (int i = 0; i < M; ++i) {
         sum += A[i * K + row] * B[i * N + col];
     }
@@ -818,56 +820,22 @@ void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, 
         return;
     }
     
-    // Use 1D grid to avoid massive block counts
+    // Calculate total elements and grid size
     int total_elements = K * N;
-    int threads_per_block = 256;  // Standard block size
+    int threads_per_block = 256;
     int blocks = (total_elements + threads_per_block - 1) / threads_per_block;
     
-    // Limit the number of blocks to prevent issues
-    const int MAX_BLOCKS = 65536;
+    // Limit blocks to prevent issues (conservative)
+    const int MAX_BLOCKS = 16384;  // Even more conservative
     if (blocks > MAX_BLOCKS) {
-        std::cout << "Warning: Too many elements (" << total_elements << "), using multiple kernel launches" << std::endl;
-        
-        // Process in chunks
-        int elements_per_launch = MAX_BLOCKS * threads_per_block;
-        int num_launches = (total_elements + elements_per_launch - 1) / elements_per_launch;
-        
-        for (int launch = 0; launch < num_launches; ++launch) {
-            int offset = launch * elements_per_launch;
-            int remaining = total_elements - offset;
-            int current_elements = min(elements_per_launch, remaining);
-            int current_blocks = (current_elements + threads_per_block - 1) / threads_per_block;
-            
-            std::cout << "  Launch " << launch+1 << "/" << num_launches 
-                      << ": processing " << current_elements << " elements with " 
-                      << current_blocks << " blocks" << std::endl;
-            
-            // Launch kernel with offset
-            hipLaunchKernelGGL([=] __device__ (const float* A, const float* B, float* C, int M, int N, int K, int global_offset) {
-                int idx = blockIdx.x * blockDim.x + threadIdx.x + global_offset;
-                
-                int total_elements = K * N;
-                if (idx >= total_elements) return;
-                
-                int row = idx / N;
-                int col = idx % N;
-                
-                if (row >= K || col >= N) return;
-                
-                float sum = 0.0f;
-                for (int i = 0; i < M; ++i) {
-                    sum += A[i * K + row] * B[i * N + col];
-                }
-                
-                C[row * N + col] = sum;
-            }, dim3(current_blocks), dim3(threads_per_block), 0, 0, A, B, C, M, N, K, offset);
-            
-            hipDeviceSynchronize();
-        }
-    } else {
-        std::cout << "Using 1D grid: " << blocks << " blocks x " << threads_per_block << " threads" << std::endl;
-        hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(blocks), dim3(threads_per_block), 0, 0, A, B, C, M, N, K);
+        blocks = MAX_BLOCKS;
+        std::cout << "Warning: Large matrix, limiting to " << MAX_BLOCKS << " blocks" << std::endl;
     }
+    
+    std::cout << "Using 1D grid: " << blocks << " blocks x " << threads_per_block << " threads" << std::endl;
+    std::cout << "Total elements: " << total_elements << std::endl;
+    
+    hipLaunchKernelGGL(matmul_transpose_A_kernel, dim3(blocks), dim3(threads_per_block), 0, 0, A, B, C, M, N, K);
     
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
@@ -884,21 +852,26 @@ void launch_matmul_transpose_A(const float* A, const float* B, float* C, int M, 
     std::cout << "matmul_transpose_A_kernel completed successfully" << std::endl;
 }
 
-// Simplified transpose_B kernel using same approach
 __global__ void matmul_transpose_B_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
+    // Use 1D indexing
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
+    // Calculate total elements we need to process
     int total_elements = M * K;
     if (idx >= total_elements) return;
     
+    // Convert 1D index to 2D coordinates  
     int row = idx / K;  // M dimension
     int col = idx % K;  // K dimension
     
+    // Double-check bounds
     if (row >= M || col >= K) return;
 
     float sum = 0.0f;
+    
+    // Compute A * B^T: C[row,col] = sum over i of A[row,i] * B[col,i]
     for (int i = 0; i < N; ++i) {
-        sum += A[row * N + i] * B[col * N + i]; // B is transposed
+        sum += A[row * N + i] * B[col * N + i];
     }
     
     C[row * K + col] = sum;
@@ -912,11 +885,20 @@ void launch_matmul_transpose_B(const float* A, const float* B, float* C, int M, 
         return;
     }
     
+    // Calculate total elements and grid size
     int total_elements = M * K;
     int threads_per_block = 256;
     int blocks = (total_elements + threads_per_block - 1) / threads_per_block;
     
+    // Limit blocks to prevent issues
+    const int MAX_BLOCKS = 16384;
+    if (blocks > MAX_BLOCKS) {
+        blocks = MAX_BLOCKS;
+        std::cout << "Warning: Large matrix, limiting to " << MAX_BLOCKS << " blocks" << std::endl;
+    }
+    
     std::cout << "Using 1D grid: " << blocks << " blocks x " << threads_per_block << " threads" << std::endl;
+    std::cout << "Total elements: " << total_elements << std::endl;
     
     hipLaunchKernelGGL(matmul_transpose_B_kernel, dim3(blocks), dim3(threads_per_block), 0, 0, A, B, C, M, N, K);
     
