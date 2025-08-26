@@ -21,13 +21,13 @@
 
 ## 🎯 What is HipGPT?
 
-HipGPT is a **complete, educational implementation** of a GPT-2 style language model built from the ground up in modern C++. Unlike black-box implementations, every component—from the BPE tokenizer to the attention mechanisms—is implemented transparently using AMD's HIP API for GPU acceleration.
+HipGPT is a **complete, educational implementation** of a GPT-2 style language model built from the ground up in modern C++. Unlike black-box implementations, every component is implemented transparently using AMD's HIP API for GPU acceleration.
 
 ### 🎓 Perfect for Learning
-- **Crystal Clear Code** — Every neural network operation implemented from scratch
-- **Educational Focus** — Designed to teach transformer internals, not just use them
-- **Complete Pipeline** — Data preprocessing, training, and inference all included
-- **AMD GPU Showcase** — Demonstrates HIP API capabilities on ROCm-enabled hardware
+- **Crystal Clear Code:** Every neural network operation implemented from scratch
+- **Educational Focus:** Designed to teach transformer internals, not just use them
+- **Complete Pipeline:** Data preprocessing, training, and inference all included
+- **AMD GPU Showcase:** Demonstrates HIP API capabilities on ROCm-enabled hardware
 
 ### ⚡ Key Features
 
@@ -44,7 +44,7 @@ HipGPT is a **complete, educational implementation** of a GPT-2 style language m
 ## 🚀 Quick Start
 
 ### Prerequisites
-- **AMD GPU** with ROCm support (RX 6000/7000 series, MI series, etc.)
+- **AMD GPU** with ROCm support
 - **ROCm Toolkit** 5.0+ ([Installation Guide](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html))
 - **CMake** 3.21+ and a modern C++ compiler
 
@@ -61,10 +61,11 @@ cd HipGPT
 # 3. Build the project
 mkdir build && cd build
 cmake .. -DCMAKE_CXX_COMPILER=/usr/bin/hipcc
-make -j$(nproc)
+make
 
 # 4. Train your model
-cd .. && ./scripts/run_train.sh
+cd ..
+./scripts/run_train.sh
 ```
 
 That's it! After training completes, you'll have a working language model ready for text generation.
