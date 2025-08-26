@@ -1,7 +1,7 @@
 ![HipGPT Logo](https://raw.githubusercontent.com/aarnetalman/HipGPT/main/assets/images/hip-hamster.png)
 
 
-# HipGPT: A GPT-2 Implementation in C++ and HIP
+# 🐹 HipGPT: A GPT-2 Implementation in C++ and HIP
 
 [](https://opensource.org/licenses/MIT)
 
