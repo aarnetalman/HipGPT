@@ -198,15 +198,6 @@ We welcome contributions! Here's how you can help:
 - 📖 **Documentation** — Help make the docs even clearer
 - 💡 **Code Contributions** — Submit PRs for bug fixes or new features
 
-### Development Setup
-```bash
-# Clone with submodules
-git clone --recursive https://github.com/aarnetalman/HipGPT.git
-
-# Run tests (if available)
-cd build && make test
-```
-
 ---
 
 <div align="center">
