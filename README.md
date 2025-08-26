@@ -236,6 +236,8 @@ cd build && make test
 
 ---
 
+<div align="center">
+
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE) - see the LICENSE file for details.
