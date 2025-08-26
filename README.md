@@ -1,6 +1,5 @@
-<p align="center">
-  <img src="assets/images/hip-hamster.png" alt="HipGPT Logo" width="200"/>
-</p>
+![HipGPT Logo](https://raw.githubusercontent.com/aarnetalman/HipGPT/main/assets/images/hip-hamster.png)
+
 
 # HipGPT: A GPT-2 Implementation in C++ and HIP
 
