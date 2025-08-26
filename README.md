@@ -157,7 +157,7 @@ HipGPT/
 │   ├── download_data.sh  # Dataset fetching
 │   └── run_train.sh      # Training pipeline
 └── 📁 data/              # Training data
-    └── tiny_shakespeare.txt
+    └── data.txt
 ```
 
 ---
