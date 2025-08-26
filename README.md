@@ -5,6 +5,8 @@
 
 HipGPT is a lightweight, implementation of a GPT-2 style transformer model written from scratch in C++ and accelerated using AMD's **[HIP API](https://rocm.docs.amd.com/en/latest/understand/hip_api/hip_api.html)** for ROCm-enabled GPUs. This project includes all the necessary components for a modern language model: a custom BPE tokenizer, a transformer-based GPT model, and GPU kernels for training and inference.
 
+**Model size (default):** ~1.55M params (E=128, L=2, H=4, F=256, V≈5k, S=32)
+
 The entire project is self-contained and designed to be a clear, understandable guide to the inner workings of large language models.
 
 **Documentation:** [https://hipgpt.github.io](https://hipgpt.github.io)
