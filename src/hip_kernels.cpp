@@ -199,7 +199,7 @@ void launch_attention_weighted_sum(const float* softmax, const float* V, float* 
     hipLaunchKernelGGL(attention_weighted_sum_kernel, dim3(blocks), dim3(threads), 0, 0, softmax, V, output, B, S, D);
 }
 
-// Fixed Multi-Head Attention Forward Kernel
+// Multi-Head Attention Forward Kernel
 __global__ void multihead_attention_kernel(
     const float* Q, const float* K, const float* V, float* output,
     int B, int S, int E, int H
@@ -789,7 +789,7 @@ void launch_matmul_transpose_B(const float* A, const float* B, float* C,
 }
 
 
-// Fixed Multi-Head Attention Backward Kernel
+// Multi-Head Attention Backward Kernel
 __global__ void multihead_attention_backward_kernel(
     const float* grad_attn_out,
     const float* q_in,
