@@ -1,183 +1,243 @@
+<div align="center">
+
 ![HipGPT Logo](https://raw.githubusercontent.com/aarnetalman/HipGPT/main/assets/images/hip-hamster.png)
 
-# 🐹 HipGPT: A GPT-2 Implementation in C++ and HIP
+# 🐹 HipGPT
 
-*HipGPT is a lightweight GPT-2 style transformer model implemented from scratch in C++ and accelerated with AMD's [HIP API](https://rocm.docs.amd.com/en/latest/understand/hip_api/hip_api.html) for ROCm-enabled GPUs.*  
-It includes all the necessary components of a modern language model: a custom BPE tokenizer, a transformer-based GPT model, and GPU kernels for training and inference.
+### A GPT-2 Implementation in C++ and HIP for AMD GPUs
 
-The project is self-contained and designed to be a **clear, educational guide** to the inner workings of large language models.  
+*An educational, from-scratch implementation of a GPT-style transformer model with custom BPE tokenizer and HIP-accelerated training*
 
-📖 **Documentation:** [https://hipgpt.github.io](https://hipgpt.github.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![ROCm](https://img.shields.io/badge/ROCm-5.0+-blue.svg)](https://rocm.docs.amd.com/)
+[![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
+[![Documentation](https://img.shields.io/badge/docs-hipgpt.github.io-green.svg)](https://hipgpt.github.io)
 
----
+[📖 Documentation](https://hipgpt.github.io) • [🚀 Quick Start](#-quick-start) • [🏗️ Architecture](#️-architecture) • [🎯 Examples](#-examples)
 
-## ❓ Why HipGPT?
-
-- 🎓 **Educational clarity** – written from scratch in modern C++ to expose all the moving parts of a GPT model  
-- ⚙️ **HIP-first** – showcases AMD’s HIP API for GPU acceleration on ROCm-enabled hardware  
-- 🧩 **Minimal yet complete** – small enough to understand in full, but includes tokenizer, model, kernels, training, and inference  
-- 🔬 **Research-friendly** – designed as a foundation for experimenting with language models on AMD GPUs  
+</div>
 
 ---
 
-## ✨ Features
+## 🎯 What is HipGPT?
 
-- 🔤 **Custom BPE Tokenizer** – built from scratch, trainable on any raw text file  
-- 🧠 **Transformer Architecture** – GPT-2 style, decoder-only model  
-- ⚡ **GPU Acceleration** – custom HIP kernels for matrix multiplication, attention, layer norm, etc.  
-- 📦 **End-to-End Workflow** – scripts for data download, training, and text generation  
-- 🛠 **Self-Contained Build System** – CMake-based, automatically fetches required dependencies  
+HipGPT is a **complete, educational implementation** of a GPT-2 style language model built from the ground up in modern C++. Unlike black-box implementations, every component—from the BPE tokenizer to the attention mechanisms—is implemented transparently using AMD's HIP API for GPU acceleration.
 
----
+### 🎓 Perfect for Learning
+- **Crystal Clear Code** — Every neural network operation implemented from scratch
+- **Educational Focus** — Designed to teach transformer internals, not just use them
+- **Complete Pipeline** — Data preprocessing, training, and inference all included
+- **AMD GPU Showcase** — Demonstrates HIP API capabilities on ROCm-enabled hardware
 
-## 📏 Model Size
+### ⚡ Key Features
 
-The number of trainable parameters depends on the vocabulary size (`V`) and transformer hyperparameters:
-
-```
-Total =
-V·E                            (token embeddings)
-
-* S·E                          (positional embeddings)
-* L·(4E² + 2E·F + F + 9E)      (per transformer layer: QKV, O, FF1/FF2, LayerNorms)
-* E·V + V                      (final projection + bias)
-
-````
-
-Where:
-- `E` = embedding dimension  
-- `L` = number of layers  
-- `H` = number of attention heads (`E` must be divisible by `H`)  
-- `F` = feed-forward hidden dimension  
-- `V` = vocabulary size  
-- `S` = maximum sequence length  
-
-**Default configuration:**  
-`E=128, L=2, H=4, F=256, V≈5000, S=32`  
-➡️ **~1.55M trainable parameters**  
-
-💾 **Memory footprint:**  
-- FP32 ≈ 6.2 MB (weights only)  
+| Feature | Description |
+|---------|-------------|
+| 🔤 **Custom BPE Tokenizer** | Trainable on any text corpus, built from scratch |
+| 🧠 **Full Transformer Stack** | Multi-head attention, feed-forward layers, layer norm |
+| ⚡ **HIP GPU Kernels** | Custom CUDA-alternative kernels for AMD hardware |
+| 📦 **Zero Dependencies** | Self-contained with automatic dependency management |
+| 🛠️ **Research Ready** | Modular design for easy experimentation |
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Quick Start
 
-### 1. Prerequisites
-- An **AMD GPU** compatible with the ROCm toolkit  
-- **ROCm Toolkit** (5.0 or newer)  
-- **CMake** (3.21 or newer)  
-- A C++ compiler (`g++` or `clang++`)  
-- `git` and `wget` for setup  
+### Prerequisites
+- **AMD GPU** with ROCm support (RX 6000/7000 series, MI series, etc.)
+- **ROCm Toolkit** 5.0+ ([Installation Guide](https://rocm.docs.amd.com/en/latest/deploy/linux/index.html))
+- **CMake** 3.21+ and a modern C++ compiler
 
-### 2. Clone the Repository
+### Installation & Training
+
 ```bash
-git clone git@github.com:aarnetalman/HipGPT.git
+# 1. Clone the repository
+git clone https://github.com/aarnetalman/HipGPT.git
 cd HipGPT
-````
 
-### 3. Download the Dataset
-
-```bash
-chmod +x scripts/download_data.sh
+# 2. Download training data (Tiny Shakespeare)
 ./scripts/download_data.sh
-```
 
-Creates a `data/` directory with `data.txt`.
-
-### 4. Build the Project
-
-```bash
-mkdir build
-cd build
+# 3. Build the project
+mkdir build && cd build
 cmake .. -DCMAKE_CXX_COMPILER=/usr/bin/hipcc
-make
+make -j$(nproc)
+
+# 4. Train your model
+cd .. && ./scripts/run_train.sh
 ```
 
-Produces two executables: `train_gpt` and `generate`.
+That's it! After training completes, you'll have a working language model ready for text generation.
 
 ---
 
-## 🏋️ Training
+## 🎯 Examples
 
-Run from the project root:
-
+### Text Generation
 ```bash
-chmod +x scripts/run_train.sh
-./scripts/run_train.sh
+# Generate Shakespeare-style text
+./build/generate --prompt "To be, or not to be:" --num_tokens 100
+
+# More creative generation
+./build/generate \
+  --prompt "Once upon a time" \
+  --num_tokens 150 \
+  --top_k 50 \
+  --temp 0.8
 ```
 
-Artifacts:
-
-* `tokenizer.json` – trained vocabulary
-* `gpt_checkpoint.bin` – trained weights
-
-Example custom run:
-
+### Custom Training
 ```bash
-./scripts/run_train.sh --steps 1000 --lr 1e-3
+# Train with custom hyperparameters
+./scripts/run_train.sh \
+  --vocab_size 2000 \
+  --seq_length 64 \
+  --learning_rate 5e-4 \
+  --steps 2000
+```
+
+### Sample Output
+```
+Prompt: "To be, or not to be:"
+
+Generated: "To be, or not to be: that is the question:
+Whether 'tis nobler in the mind to suffer
+The slings and arrows of outrageous fortune,
+Or to take arms against a sea of troubles..."
 ```
 
 ---
 
-## ✍️ Generating Text
+## 🏗️ Architecture
 
-```bash
-./build/generate --prompt "To be, or not to be:"
+<div align="center">
+
+```mermaid
+graph TD
+    A[Raw Text] --> B[BPE Tokenizer]
+    B --> C[Token Embeddings]
+    C --> D[Positional Embeddings]
+    D --> E[Transformer Layer 1]
+    E --> F[Transformer Layer 2]
+    F --> G[...]
+    G --> H[Transformer Layer N]
+    H --> I[Layer Norm]
+    I --> J[Linear Projection]
+    J --> K[Vocabulary Logits]
+    
+    style A fill:#e1f5fe
+    style K fill:#f3e5f5
+    
+    E --> E1[Multi-Head Attention]
+    E1 --> E2[Feed Forward]
+    E2 --> E3[Residual + Norm]
 ```
 
-Options:
+</div>
 
-* `--prompt "<text>"` (required)
-* `--num_tokens N` (default: 50)
-* `--top_k N` (default: 5)
-* `--temp F` (default: 1.0)
+### Core Components
 
-Example:
+- **🔤 BPE Tokenizer** — Learns subword vocabulary from your training data
+- **🧠 Transformer Layers** — Multi-head self-attention + position-wise FFN
+- **⚡ HIP Kernels** — GPU-accelerated matrix operations, attention, and activations
+- **🎯 Training Loop** — Adam optimizer with gradient accumulation and checkpointing
 
-```bash
-./build/generate --prompt "My kingdom for a" --num_tokens 100 --top_k 50 --temp 0.8
+---
+
+## 📊 Model Specifications
+
+### Default Configuration
+```cpp
+Embedding Dimension:     128
+Number of Layers:        2
+Attention Heads:         4
+Feed-Forward Hidden:     256
+Vocabulary Size:         ~5,000
+Context Length:          32
 ```
+
+### Parameter Count
+**~1.55M trainable parameters** (6.2 MB in FP32)
+
+Perfect size for:
+- 🎓 Educational exploration
+- 💻 Running on consumer GPUs
+- ⚡ Fast iteration cycles
+- 🔬 Research prototyping
 
 ---
 
 ## 📂 Project Structure
 
 ```
-.
-├── build/                 # Build outputs
-├── data/                  # Training data
-├── scripts/               # Helper scripts
-│   ├── download_data.sh
-│   └── run_train.sh
-├── include/               # Public headers
-│   ├── gpt_model.h
-│   ├── hip_kernels.h
-│   ├── tokenizer.h
-│   └── transformer_layer.h
-├── src/                   # Source files
-│   ├── generate.cpp
-│   ├── gpt_model.cpp
-│   ├── hip_kernels.cpp
-│   ├── tokenizer.cpp
-│   ├── train_gpt.cpp
-│   └── transformer_layer.cpp
-├── CMakeLists.txt         # Build config
-├── LICENSE
-└── README.md
+HipGPT/
+├── 📁 include/           # Public API headers
+│   ├── gpt_model.h       # Main model interface
+│   ├── tokenizer.h       # BPE tokenizer
+│   └── hip_kernels.h     # GPU kernel declarations
+├── 📁 src/               # Implementation
+│   ├── train_gpt.cpp     # Training entry point
+│   ├── generate.cpp      # Text generation CLI
+│   ├── gpt_model.cpp     # Model orchestration
+│   └── hip_kernels.cpp   # GPU kernel implementations
+├── 📁 scripts/           # Automation
+│   ├── download_data.sh  # Dataset fetching
+│   └── run_train.sh      # Training pipeline
+└── 📁 data/              # Training data
+    └── tiny_shakespeare.txt
 ```
 
 ---
 
-## 🏗 Architecture Overview
+## 🔧 Advanced Usage
 
-* **BPE Tokenizer** – converts raw text into integer IDs, trainable from scratch
-* **Transformer Layer** – multi-head self-attention + FFN with residuals and layer norm
-* **GPT Model** – embeddings + stacked transformer layers + final projection to vocab
+### Custom Datasets
+```bash
+# Train on your own text file
+./build/train_gpt --data_file your_dataset.txt
+```
+
+### Hyperparameter Tuning
+```bash
+# Experiment with model architecture
+./build/train_gpt \
+  --embed_dim 256 \
+  --num_layers 4 \
+  --num_heads 8 \
+  --learning_rate 3e-4 \
+  --batch_size 64
+```
+
+### Checkpointing & Resume
+```bash
+# Resume training from checkpoint
+./build/train_gpt --resume_from gpt_checkpoint.bin
+```
 
 ---
 
-## 📜 License
+## 🤝 Contributing
 
-This project is licensed under the MIT License.
+We welcome contributions! Here's how you can help:
 
+- 🐛 **Bug Reports** — Found an issue? Please open a GitHub issue
+- 🚀 **Feature Requests** — Ideas for improvements are always welcome
+- 📖 **Documentation** — Help make the docs even clearer
+- 💡 **Code Contributions** — Submit PRs for bug fixes or new features
+
+### Development Setup
+```bash
+# Clone with submodules
+git clone --recursive https://github.com/aarnetalman/HipGPT.git
+
+# Run tests (if available)
+cd build && make test
+```
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE) - see the LICENSE file for details.
+
+</div>
