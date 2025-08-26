@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/images/hip-hamster.png" alt="HipGPT Logo" width="200"/>
+</p>
+
 # HipGPT: A GPT-2 Implementation in C++ and HIP
 
 [](https://opensource.org/licenses/MIT)
