@@ -1,4 +1,3 @@
-// File: transformer_layer.cpp
 #include "transformer_layer.h"
 #include "hip_kernels.h"
 #include <hip/hip_runtime.h>

@@ -1,4 +1,3 @@
-// File: hip_kernels.cpp
 #include "hip_kernels.h"
 #include <hip/hip_runtime.h>
 #include <cmath>
@@ -86,7 +85,7 @@ void launch_matmul_add_bias(const float* A, const float* B, const float* bias, f
     hipLaunchKernelGGL(matmul_add_bias_kernel, blocks, threads, 0, 0, A, B, bias, C, M, N, K);
 }
 
-// ---------------- Matmul Backward with Bias (Corrected) ----------------
+// ---------------- Matmul Backward with Bias ----------------
 __global__ void matmul_backward_weight_kernel(const float* A_input, const float* B_grad_out, float* C_grad_weight, int M, int N, int K) {
     int row = blockIdx.y * blockDim.y + threadIdx.y; // K
     int col = blockIdx.x * blockDim.x + threadIdx.x; // N

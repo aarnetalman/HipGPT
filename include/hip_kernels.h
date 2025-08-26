@@ -1,4 +1,3 @@
-// File: hip_kernels.h
 #pragma once
 
 #include <hip/hip_runtime.h>

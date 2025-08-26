@@ -1,4 +1,3 @@
-// File: gpt_model.h
 #pragma once
 
 #include "transformer_layer.h"
