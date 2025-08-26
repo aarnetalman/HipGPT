@@ -13,7 +13,7 @@
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
 [![Documentation](https://img.shields.io/badge/docs-hipgpt.github.io-green.svg)](https://hipgpt.github.io)
 
-[📖 Documentation](https://hipgpt.github.io) • [🚀 Quick Start](#-quick-start) • [🏗️ Architecture](#️-architecture) • [🎯 Examples](#-examples)
+[📖 Documentation](https://hipgpt.github.io) • [🚀 Quick Start](#-quick-start) • [🎯 Examples](#-examples)
 
 </div>
 
@@ -107,33 +107,6 @@ Or to take arms against a sea of troubles..."
 ```
 
 ---
-
-## 🏗️ Architecture
-
-<div align="center">
-
-```mermaid
-graph TD
-    A[Raw Text] --> B[BPE Tokenizer]
-    B --> C[Token Embeddings]
-    C --> D[Positional Embeddings]
-    D --> E[Transformer Layer 1]
-    E --> F[Transformer Layer 2]
-    F --> G[...]
-    G --> H[Transformer Layer N]
-    H --> I[Layer Norm]
-    I --> J[Linear Projection]
-    J --> K[Vocabulary Logits]
-    
-    style A fill:#e1f5fe
-    style K fill:#f3e5f5
-    
-    E --> E1[Multi-Head Attention]
-    E1 --> E2[Feed Forward]
-    E2 --> E3[Residual + Norm]
-```
-
-</div>
 
 ### Core Components
 
