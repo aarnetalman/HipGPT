@@ -12,6 +12,7 @@
 #include <regex>
 #include <algorithm>
 #include <string>
+#include <cmath>
 
 // keep only the newest `keep_last` step-checkpoints; don't touch gpt_checkpoint.bin
 void prune_old_checkpoints(const std::string& dir, const std::string& prefix, int keep_last) {
@@ -180,9 +181,11 @@ int main(int argc, char** argv) {
             hipEventElapsedTime(&ms, start, stop);
 
             if ((step % log_every) == 0 || step == num_steps - 1) {
+                float ppl = std::exp(loss);
                 std::cout << "[Step " << step << "] Loss: " << loss
-                          << " | Accuracy: " << acc * 100.0f << "%"
-                          << " | Time: " << ms << " ms" << std::endl;
+                        << " | Perplexity: " << ppl
+                        << " | Accuracy: " << acc * 100.0f << "%"
+                        << " | Time: " << ms << " ms" << std::endl;
             }
 
             if (ckpt_every > 0 && step > 0 && (step % ckpt_every) == 0) {
