@@ -26,12 +26,6 @@ std::vector<std::string> Tokenizer::split_word(const std::string& word) {
     return tokens;
 }
 
-struct PairHash {
-    size_t operator()(const std::pair<std::string,std::string>& p) const {
-        return std::hash<std::string>()(p.first) ^ (std::hash<std::string>()(p.second) << 1);
-    }
-};
-
 void Tokenizer::train_bpe(const std::string& text) {
     std::istringstream iss(text);
     std::string word;
