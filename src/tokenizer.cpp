@@ -8,6 +8,7 @@
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <unordered_map>
+#include <unordered_set>
 #include <queue>
 #include <chrono>
 
@@ -15,253 +16,218 @@ using json = nlohmann::json;
 
 Tokenizer::Tokenizer(int vocab_limit) : vocab_limit_(vocab_limit) {}
 
+// ----------------------- util ------------------------
 std::vector<std::string> Tokenizer::split_word(const std::string& word) {
     std::vector<std::string> tokens;
-    for (char c : word) {
-        tokens.push_back(std::string(1, c));
-    }
-    if (!tokens.empty()) {
-        tokens.back() += "</w>"; // mark end of word
-    }
+    for (char c : word) tokens.push_back(std::string(1, c));
+    if (!tokens.empty()) tokens.back() += "</w>";
     return tokens;
 }
 
+struct PairHash {
+    size_t operator()(const std::pair<int,int>& p) const noexcept {
+        return ((uint64_t)p.first << 32) ^ (uint64_t)p.second;
+    }
+};
+
+// ----------------------- train ------------------------
 void Tokenizer::train_bpe(const std::string& text) {
     std::istringstream iss(text);
     std::string word;
 
     // 1. Count word frequencies
-    std::unordered_map<std::string, int> word_freq;
-    while (iss >> word) {
-        word_freq[word]++;
-    }
+    std::unordered_map<std::string,int> word_freq;
+    while (iss >> word) word_freq[word]++;
 
     // 2. Initialize vocab with characters only
     std::set<char> char_vocab;
-    for (const auto& [w, f] : word_freq) {
+    for (auto& [w,f] : word_freq) {
         for (char c : w) char_vocab.insert(c);
     }
-    for (char c : char_vocab) {
-        stoi_to_token.push_back(std::string(1, c));
-    }
+    for (char c : char_vocab) stoi_to_token.push_back(std::string(1,c));
     std::sort(stoi_to_token.begin(), stoi_to_token.end());
-    for (size_t i = 0; i < stoi_to_token.size(); ++i) {
-        token_to_stoi[stoi_to_token[i]] = i;
-    }
+    for (size_t i=0;i<stoi_to_token.size();++i) token_to_stoi[stoi_to_token[i]]=i;
 
-    // Tokenized words
-    std::unordered_map<std::string, std::vector<std::string>> word_tokens;
-    for (auto& [w, f] : word_freq) {
+    // 3. Tokenize words (int ids)
+    struct WordInfo {
+        std::vector<int> tokens;
+        int freq;
+    };
+    std::vector<WordInfo> words;
+    words.reserve(word_freq.size());
+    for (auto& [w,f] : word_freq) {
         auto toks = split_word(w);
-        word_tokens[w] = std::move(toks);
+        std::vector<int> ids;
+        ids.reserve(toks.size());
+        for (auto& t : toks) {
+            if (!token_to_stoi.count(t)) {
+                token_to_stoi[t] = stoi_to_token.size();
+                stoi_to_token.push_back(t);
+            }
+            ids.push_back(token_to_stoi[t]);
+        }
+        words.push_back({std::move(ids), f});
     }
 
-    std::cout << "[BPE] Starting training, target vocab size = "
-              << vocab_limit_ << " ..." << std::endl;
+    std::cout << "[BPE] Starting training, target vocab size="<<vocab_limit_<<"...\n";
     auto start_time = std::chrono::steady_clock::now();
 
-    // 3. Pair frequency table
-    std::unordered_map<std::pair<std::string,std::string>, int, PairHash> pair_freq;
-    auto update_pair_freqs = [&](const std::vector<std::string>& tokens, int count, int sign) {
-        for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-            auto pair = std::make_pair(tokens[i], tokens[i+1]);
-            pair_freq[pair] += sign * count;
-            if (pair_freq[pair] <= 0) pair_freq.erase(pair);
+    // 4. Build initial pair frequencies and inverted index
+    using Pair = std::pair<int,int>;
+    std::unordered_map<Pair,int,PairHash> pair_freq;
+    std::unordered_map<Pair,std::vector<int>,PairHash> pair_to_words;
+
+    auto add_pairs = [&](const std::vector<int>& toks,int freq,int wid){
+        for(size_t i=0;i+1<toks.size();++i){
+            Pair p={toks[i],toks[i+1]};
+            pair_freq[p]+=freq;
+            pair_to_words[p].push_back(wid);
         }
     };
+    for(int wid=0;wid<(int)words.size();++wid) add_pairs(words[wid].tokens,words[wid].freq,wid);
 
-    for (auto& [w, toks] : word_tokens) {
-        update_pair_freqs(toks, word_freq[w], +1);
-    }
+    // heap of (freq,pair)
+    auto cmp=[](auto&a,auto&b){return a.first<b.first;};
+    std::priority_queue<std::pair<int,Pair>,std::vector<std::pair<int,Pair>>,decltype(cmp)> pq(cmp);
+    for(auto& [p,f]:pair_freq) pq.push({f,p});
 
-    // Priority queue (max-heap of (freq, pair))
-    auto cmp = [](const auto& a, const auto& b){ return a.first < b.first; };
-    std::priority_queue<std::pair<int,std::pair<std::string,std::string>>,
-                        std::vector<std::pair<int,std::pair<std::string,std::string>>>,
-                        decltype(cmp)> pq(cmp);
+    int merges=0;
+    while(vocab_size()<vocab_limit_ && !pq.empty()){
+        auto [freq,best]=pq.top(); pq.pop();
+        if(!pair_freq.count(best) || pair_freq[best]!=freq) continue;
+        if(freq<=1) break; // cutoff
 
-    for (auto& [p, f] : pair_freq) {
-        pq.push({f, p});
-    }
-
-    int merges = 0;
-
-    // 4. Merge loop
-    while (vocab_size() < vocab_limit_ && !pq.empty()) {
-        auto [freq, best_pair] = pq.top(); pq.pop();
-        if (!pair_freq.count(best_pair) || pair_freq[best_pair] != freq) continue; // outdated
-
-        if (freq <= 1) break; // stop early if merges aren’t useful
-
-        std::string merged = best_pair.first + best_pair.second;
-        if (token_to_stoi.count(merged)) continue;
-
-        // Add new token
-        token_to_stoi[merged] = vocab_size();
+        // create merged token
+        std::string merged=stoi_to_token[best.first]+stoi_to_token[best.second];
+        if(token_to_stoi.count(merged)) continue;
+        int merged_id=vocab_size();
+        token_to_stoi[merged]=merged_id;
         stoi_to_token.push_back(merged);
-        merge_rank[best_pair] = merges; // save merge order
-        merges++;
+        merge_rank[best]=merges++;
+        
+        // words containing this pair
+        auto affected=pair_to_words[best];
+        pair_to_words.erase(best);
+        pair_freq.erase(best);
 
-        // Deduplication set for this iteration
-        std::unordered_set<std::pair<std::string,std::string>, PairHash> pushed_pairs;
+        std::unordered_set<Pair,PairHash> updated_pairs;
+        for(int wid:affected){
+            auto& info=words[wid];
+            auto& toks=info.tokens;
+            if(toks.size()<2) continue;
 
-        // Update all words containing this pair
-        for (auto& [w, tokens] : word_tokens) {
-            bool changed = false;
-
-            update_pair_freqs(tokens, word_freq[w], -1);
-
-            std::vector<std::string> new_tokens;
-            for (size_t i = 0; i < tokens.size();) {
-                if (i + 1 < tokens.size() &&
-                    tokens[i] == best_pair.first &&
-                    tokens[i+1] == best_pair.second) {
-                    new_tokens.push_back(merged);
-                    i += 2;
-                    changed = true;
+            // try merging occurrences
+            std::vector<int> new_toks;
+            new_toks.reserve(toks.size());
+            bool changed=false;
+            for(size_t i=0;i<toks.size();){
+                if(i+1<toks.size() && toks[i]==best.first && toks[i+1]==best.second){
+                    new_toks.push_back(merged_id);
+                    i+=2; changed=true;
                 } else {
-                    new_tokens.push_back(tokens[i]);
-                    i += 1;
+                    new_toks.push_back(toks[i]); i++;
                 }
             }
-            if (changed) {
-                tokens.swap(new_tokens);
+            if(!changed) continue;
+
+            // remove old pairs
+            for(size_t i=0;i+1<toks.size();++i){
+                Pair p={toks[i],toks[i+1]};
+                pair_freq[p]-=info.freq;
+                if(pair_freq[p]<=0) pair_freq.erase(p);
             }
-
-            update_pair_freqs(tokens, word_freq[w], +1);
-
-            // Push only new pairs around merged token, avoid duplicates
-            for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-                if (tokens[i] == merged || tokens[i+1] == merged) {
-                    auto p = std::make_pair(tokens[i], tokens[i+1]);
-                    if (pair_freq.count(p) && !pushed_pairs.count(p)) {
-                        pq.push({pair_freq[p], p});
-                        pushed_pairs.insert(p);
-                    }
+            toks.swap(new_toks);
+            // add new pairs
+            for(size_t i=0;i+1<toks.size();++i){
+                Pair p={toks[i],toks[i+1]};
+                pair_freq[p]+=info.freq;
+                if(!updated_pairs.count(p)){
+                    pq.push({pair_freq[p],p});
+                    updated_pairs.insert(p);
                 }
+                pair_to_words[p].push_back(wid);
             }
         }
 
-        if (merges % 100 == 0 || vocab_size() == vocab_limit_) {
-            auto now = std::chrono::steady_clock::now();
-            double elapsed = std::chrono::duration<double>(now - start_time).count();
-            std::cout << "[BPE] Merges: " << merges
-                      << " | Vocab size: " << vocab_size()
-                      << " | Elapsed: " << elapsed << "s" << std::endl;
+        if(merges%100==0 || vocab_size()==vocab_limit_){
+            auto now=std::chrono::steady_clock::now();
+            double elapsed=std::chrono::duration<double>(now-start_time).count();
+            std::cout<<"[BPE] Merges:"<<merges<<" | Vocab:"<<vocab_size()<<" | Elapsed:"<<elapsed<<"s\n";
         }
     }
 
-    std::cout << "[BPE] Training finished. Final vocab size: "
-              << vocab_size() << std::endl;
+    std::cout<<"[BPE] Training finished. Final vocab size="<<vocab_size()<<"\n";
 }
 
-
-std::vector<std::string> Tokenizer::encode_word_as_tokens(const std::string& word) {
-    if (token_cache.count(word)) return token_cache[word];
-
-    std::vector<std::string> tokens = split_word(word);
-
-    while (tokens.size() > 1) {
-        std::pair<std::string,std::string> best_pair;
-        int best_rank = std::numeric_limits<int>::max();
-
-        for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-            auto candidate = std::make_pair(tokens[i], tokens[i+1]);
-            if (merge_rank.count(candidate) && merge_rank[candidate] < best_rank) {
-                best_rank = merge_rank[candidate];
-                best_pair = candidate;
+// ------------------- encoding ---------------------
+std::vector<std::string> Tokenizer::encode_word_as_tokens(const std::string& word){
+    if(token_cache.count(word)) return token_cache[word];
+    std::vector<std::string> toks=split_word(word);
+    // greedy merge by merge_rank
+    while(toks.size()>1){
+        std::pair<std::string,std::string> best; int best_rank=INT_MAX;
+        for(size_t i=0;i+1<toks.size();++i){
+            auto cand=std::make_pair(toks[i],toks[i+1]);
+            if(merge_rank.count(cand)&&merge_rank[cand]<best_rank){
+                best_rank=merge_rank[cand]; best=cand;
             }
         }
-
-        if (best_rank == std::numeric_limits<int>::max()) break;
-
-        std::vector<std::string> new_tokens;
-        for (size_t i = 0; i < tokens.size();) {
-            if (i + 1 < tokens.size() &&
-                tokens[i] == best_pair.first &&
-                tokens[i+1] == best_pair.second) {
-                new_tokens.push_back(best_pair.first + best_pair.second);
-                i += 2;
-            } else {
-                new_tokens.push_back(tokens[i]);
-                i += 1;
-            }
+        if(best_rank==INT_MAX) break;
+        std::vector<std::string> newt;
+        for(size_t i=0;i<toks.size();){
+            if(i+1<toks.size() && toks[i]==best.first && toks[i+1]==best.second){
+                newt.push_back(best.first+best.second); i+=2;
+            } else { newt.push_back(toks[i]); i++; }
         }
-        tokens.swap(new_tokens);
+        toks.swap(newt);
     }
-
-    token_cache[word] = tokens;
-    return tokens;
+    return token_cache[word]=toks;
 }
 
-std::vector<int> Tokenizer::encode(const std::string& text) {
+std::vector<int> Tokenizer::encode(const std::string& text){
     std::istringstream iss(text);
-    std::string word;
-    std::vector<int> result;
-
-    while (iss >> word) {
-        auto tokens = encode_word_as_tokens(word);
-        for (const auto& t : tokens) {
-            if (token_to_stoi.count(t)) {
-                result.push_back(token_to_stoi[t]);
-            }
-        }
-    }
-    return result;
-}
-
-std::string Tokenizer::decode(const std::vector<int>& ids) {
-    std::string out;
-    for (int id : ids) {
-        if (id < 0 || id >= vocab_size()) continue;
-        std::string token = stoi_to_token[id];
-        if (token.size() >= 4 && token.substr(token.size() - 4) == "</w>") {
-            out += token.substr(0, token.size() - 4) + " ";
-        } else {
-            out += token;
-        }
+    std::string w; std::vector<int> out;
+    while(iss>>w){
+        auto toks=encode_word_as_tokens(w);
+        for(auto& t:toks) if(token_to_stoi.count(t)) out.push_back(token_to_stoi[t]);
     }
     return out;
 }
 
-void Tokenizer::save(const std::string& filepath) const {
-    json j;
-    j["stoi_to_token"] = stoi_to_token;
-
-    // Save merge ranks as array of [first, second, rank]
-    json merges_json = json::array();
-    for (auto& kv : merge_rank) {
-        merges_json.push_back({kv.first.first, kv.first.second, kv.second});
+std::string Tokenizer::decode(const std::vector<int>& ids){
+    std::string out;
+    for(int id:ids){
+        if(id<0||id>=vocab_size()) continue;
+        auto tok=stoi_to_token[id];
+        if(tok.size()>=4 && tok.substr(tok.size()-4)=="</w>")
+            out+=tok.substr(0,tok.size()-4)+" ";
+        else out+=tok;
     }
-    j["merge_rank"] = merges_json;
-
-    std::ofstream out(filepath);
-    out << j.dump(2);
+    return out;
 }
 
-void Tokenizer::load(const std::string& filepath) {
-    std::ifstream in(filepath);
-    if (!in) {
-        std::cerr << "Error: Cannot open tokenizer file " << filepath << std::endl;
-        return;
-    }
+// ------------------- save/load ---------------------
+void Tokenizer::save(const std::string& path) const{
     json j;
-    in >> j;
-
-    stoi_to_token = j["stoi_to_token"].get<std::vector<std::string>>();
+    j["stoi_to_token"]=stoi_to_token;
+    json merges=json::array();
+    for(auto& kv:merge_rank)
+        merges.push_back({kv.first.first,kv.first.second,kv.second});
+    j["merge_rank"]=merges;
+    std::ofstream out(path); out<<j.dump(2);
+}
+void Tokenizer::load(const std::string& path){
+    std::ifstream in(path);
+    if(!in){std::cerr<<"Cannot open "<<path<<"\n";return;}
+    json j; in>>j;
+    stoi_to_token=j["stoi_to_token"].get<std::vector<std::string>>();
     token_to_stoi.clear();
-    for (size_t i = 0; i < stoi_to_token.size(); ++i) {
-        token_to_stoi[stoi_to_token[i]] = i;
-    }
-
+    for(size_t i=0;i<stoi_to_token.size();++i) token_to_stoi[stoi_to_token[i]]=i;
     merge_rank.clear();
-    if (j.contains("merge_rank")) {
-        for (auto& mr : j["merge_rank"]) {
-            std::pair<std::string,std::string> p = {mr[0].get<std::string>(), mr[1].get<std::string>()};
-            int rank = mr[2].get<int>();
-            merge_rank[p] = rank;
+    if(j.contains("merge_rank")){
+        for(auto& mr:j["merge_rank"]){
+            merge_rank[{mr[0],mr[1]}]=mr[2];
         }
     }
-
-    token_cache.clear(); // Clear cache after loading
+    token_cache.clear();
 }
