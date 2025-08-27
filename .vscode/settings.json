@@ -53,6 +53,10 @@
         "__node_handle": "cpp",
         "charconv": "cpp",
         "iomanip": "cpp",
-        "optional": "cpp"
+        "optional": "cpp",
+        "deque": "cpp",
+        "queue": "cpp",
+        "regex": "cpp",
+        "unordered_set": "cpp"
     }
 }
