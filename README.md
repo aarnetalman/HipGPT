@@ -13,7 +13,7 @@
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
 [![Documentation](https://img.shields.io/badge/docs-hipgpt.github.io-green.svg)](https://hipgpt.github.io)
 
-[📖 Documentation](https://hipgpt.github.io) • [🚀 Quick Start](#-quick-start) • [🎯 Examples](#-examples)
+[📖 Documentation](https://hipgpt.github.io) - [🚀 Quick Start](#-quick-start) - [🎯 Examples](#-examples)
 
 </div>
 
