@@ -16,10 +16,26 @@ using json = nlohmann::json;
 
 Tokenizer::Tokenizer(int vocab_limit) : vocab_limit_(vocab_limit) {}
 
+// ----------------------- UTF-8 helper ------------------------
+static std::vector<std::string> utf8_split(const std::string& str) {
+    std::vector<std::string> tokens;
+    for (size_t i = 0; i < str.size();) {
+        unsigned char c = static_cast<unsigned char>(str[i]);
+        size_t char_len = 1;
+        if ((c & 0x80) == 0) char_len = 1;         // 0xxxxxxx
+        else if ((c & 0xE0) == 0xC0) char_len = 2; // 110xxxxx
+        else if ((c & 0xF0) == 0xE0) char_len = 3; // 1110xxxx
+        else if ((c & 0xF8) == 0xF0) char_len = 4; // 11110xxx
+        if (i + char_len > str.size()) char_len = 1; // fallback (truncated)
+        tokens.push_back(str.substr(i, char_len));
+        i += char_len;
+    }
+    return tokens;
+}
+
 // ----------------------- util ------------------------
 std::vector<std::string> Tokenizer::split_word(const std::string& word) {
-    std::vector<std::string> tokens;
-    for (char c : word) tokens.push_back(std::string(1, c));
+    std::vector<std::string> tokens = utf8_split(word);
     if (!tokens.empty()) tokens.back() += "</w>";
     return tokens;
 }
@@ -39,12 +55,13 @@ void Tokenizer::train_bpe(const std::string& text) {
     std::unordered_map<std::string,int> word_freq;
     while (iss >> word) word_freq[word]++;
 
-    // 2. Initialize vocab with characters only
-    std::set<char> char_vocab;
+    // 2. Initialize vocab with UTF-8 characters only
+    std::unordered_set<std::string> char_vocab;
     for (auto& [w,f] : word_freq) {
-        for (char c : w) char_vocab.insert(c);
+        auto chars = utf8_split(w);
+        for (auto& c : chars) char_vocab.insert(c);
     }
-    for (char c : char_vocab) stoi_to_token.push_back(std::string(1,c));
+    for (auto& c : char_vocab) stoi_to_token.push_back(c);
     std::sort(stoi_to_token.begin(), stoi_to_token.end());
     for (size_t i=0;i<stoi_to_token.size();++i) token_to_stoi[stoi_to_token[i]]=i;
 
@@ -169,7 +186,6 @@ std::vector<std::string> Tokenizer::encode_word_as_tokens(const std::string& wor
         int best_rank = INT_MAX;
         
         for(size_t i = 0; i + 1 < toks.size(); ++i){
-            // Convert string tokens to int IDs for lookup
             if(token_to_stoi.count(toks[i]) && token_to_stoi.count(toks[i+1])){
                 auto int_pair = std::make_pair(token_to_stoi[toks[i]], token_to_stoi[toks[i+1]]);
                 if(merge_rank.count(int_pair) && merge_rank[int_pair] < best_rank){
@@ -181,7 +197,6 @@ std::vector<std::string> Tokenizer::encode_word_as_tokens(const std::string& wor
         
         if(best_rank == INT_MAX) break;
         
-        // Convert back to strings for merging
         std::string first_token = stoi_to_token[best_pair.first];
         std::string second_token = stoi_to_token[best_pair.second];
         
@@ -223,58 +238,37 @@ std::string Tokenizer::decode(const std::vector<int>& ids){
 }
 
 // ------------------- save/load ---------------------
-// ------------------- save/load ---------------------
-void Tokenizer::save(const std::string& path) const {
+void Tokenizer::save(const std::string& path) const{
     json j;
-    j["stoi_to_token"] = stoi_to_token;
-
-    // Save merge ranks as array of [token_str1, token_str2, rank]
-    json merges = json::array();
-    for (auto& kv : merge_rank) {
-        merges.push_back({
-            stoi_to_token[kv.first.first],
-            stoi_to_token[kv.first.second],
-            kv.second
-        });
-    }
-    j["merge_rank"] = merges;
-
-    std::ofstream out(path);
-    out << j.dump(2);
+    j["stoi_to_token"]=stoi_to_token;
+    json merges=json::array();
+    for(auto& kv:merge_rank)
+        merges.push_back({stoi_to_token[kv.first.first],
+                          stoi_to_token[kv.first.second],
+                          kv.second});
+    j["merge_rank"]=merges;
+    std::ofstream out(path); out<<j.dump(2);
 }
 
-void Tokenizer::load(const std::string& path) {
+void Tokenizer::load(const std::string& path){
     std::ifstream in(path);
-    if (!in) {
-        std::cerr << "Cannot open " << path << "\n";
-        return;
-    }
-    json j;
-    in >> j;
-
-    // Rebuild vocab
-    stoi_to_token = j["stoi_to_token"].get<std::vector<std::string>>();
+    if(!in){std::cerr<<"Cannot open "<<path<<"\n";return;}
+    json j; in>>j;
+    stoi_to_token=j["stoi_to_token"].get<std::vector<std::string>>();
     token_to_stoi.clear();
-    for (size_t i = 0; i < stoi_to_token.size(); ++i)
-        token_to_stoi[stoi_to_token[i]] = i;
-
-    // Rebuild merge ranks
+    for(size_t i=0;i<stoi_to_token.size();++i) token_to_stoi[stoi_to_token[i]]=i;
     merge_rank.clear();
-    if (j.contains("merge_rank")) {
-        for (auto& mr : j["merge_rank"]) {
+    if(j.contains("merge_rank")){
+        for(auto& mr:j["merge_rank"]){
             std::string tok1 = mr[0].get<std::string>();
             std::string tok2 = mr[1].get<std::string>();
-            
-            if (token_to_stoi.count(tok1) && token_to_stoi.count(tok2)) {
-                int id1 = token_to_stoi[tok1];
-                int id2 = token_to_stoi[tok2];
-                int rank = mr[2].get<int>();
-                merge_rank[{id1, id2}] = rank;
-            } else {
-                std::cerr << "Warning: merge pair (" << tok1 << ", " << tok2 << ") not found in vocab\n";
+            if(token_to_stoi.count(tok1) && token_to_stoi.count(tok2)){
+                int id1=token_to_stoi[tok1];
+                int id2=token_to_stoi[tok2];
+                int rank=mr[2].get<int>();
+                merge_rank[{id1,id2}] = rank;
             }
         }
     }
-
     token_cache.clear();
 }
