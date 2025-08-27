@@ -1,10 +1,16 @@
 #pragma once
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <vector>
-#include <set>
-#include <map>
 #include <utility>
+
+// Custom hash for string pairs
+struct PairHash {
+    size_t operator()(const std::pair<std::string,std::string>& p) const {
+        return std::hash<std::string>()(p.first) ^ (std::hash<std::string>()(p.second) << 1);
+    }
+};
 
 class Tokenizer {
 public:
@@ -25,12 +31,13 @@ private:
     std::unordered_map<std::string, int> token_to_stoi;
     std::vector<std::string> stoi_to_token;
 
-    // For tracking frequency of token pairs during training
-    std::map<std::pair<std::string, std::string>, int> pair_freq;
-
-    // For caching word-to-token mappings to speed up encoding
+    // Cache: word → tokenized form
     std::unordered_map<std::string, std::vector<std::string>> token_cache;
 
+    // Merge ranks: pair → order
+    std::unordered_map<std::pair<std::string,std::string>, int, PairHash> merge_rank;
+
+    // Internal helpers
     std::vector<std::string> split_word(const std::string& word);
     std::vector<std::string> encode_word_as_tokens(const std::string& word);
 };
