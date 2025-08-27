@@ -2,10 +2,23 @@
 #include <hip/hip_runtime.h>
 #include <cmath>
 #include <climits>
+#include <cstdio> 
 
 #define TILE_SIZE 32
 #define WARP_SIZE 64  // AMD warp size
 #define MAX_THREADS_PER_BLOCK 1024
+
+
+
+#define HIP_CHECK(cmd)                                                        \
+    do {                                                                      \
+        hipError_t _e = (cmd);                                                \
+        if (_e != hipSuccess) {                                               \
+            fprintf(stderr, "HIP error %s:%d: %s\n", __FILE__, __LINE__,      \
+                    hipGetErrorString(_e));                                   \
+            abort();                                                          \
+        }                                                                     \
+    } while (0)
 
 // Simple XOR-WOW pseudo-random number generator state
 struct xorwow_state {
@@ -261,9 +274,10 @@ __global__ void flash_attention_kernel(
     const float scale = rsqrtf((float)HEAD_DIM);
     
     // Shared memory for current block of K, V
-    extern __shared__ float smem[];
-    float* s_K = smem;
+    extern __shared__ unsigned char smem_u8[];
+    float* s_K = reinterpret_cast<float*>(smem_u8);
     float* s_V = s_K + HEAD_DIM * blockDim.y;
+
     
     const int q_offset = (batch_idx * S + query_idx) * E + head_idx * HEAD_DIM;
     const int kv_base = batch_idx * S * E + head_idx * HEAD_DIM;
@@ -985,9 +999,9 @@ void launch_adam_update(
 
 // ---------------- Sampling ----------------
 __global__ void sample_from_logits_kernel(const float* logits, int* output_token, int vocab_size, int k, float temperature) {
-    extern __shared__ unsigned char smem[];
-    float* top_k_scores = reinterpret_cast<float*>(smem);
-    int* top_k_indices = reinterpret_cast<int*>(top_k_scores + k);
+    extern __shared__ unsigned char smem_u8_logits[]; 
+    float* top_k_scores = reinterpret_cast<float*>(smem_u8_logits);
+    int*   top_k_indices = reinterpret_cast<int*>(top_k_scores + k)
 
     temperature = fmaxf(temperature, 1e-6f);
 
