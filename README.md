@@ -29,7 +29,7 @@ HipGPT is a **complete, educational implementation** of a GPT-2 style language m
 - **Complete Pipeline:** Data preprocessing, training, and inference all included  
 - **AMD GPU Showcase:** Demonstrates HIP API capabilities on ROCm-enabled hardware  
 
-### ⚡ Key Features
+### Key Features
 
 | Feature | Description |
 |---------|-------------|
@@ -41,7 +41,7 @@ HipGPT is a **complete, educational implementation** of a GPT-2 style language m
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 - **AMD GPU** with ROCm support  
