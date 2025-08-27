@@ -1001,7 +1001,7 @@ void launch_adam_update(
 __global__ void sample_from_logits_kernel(const float* logits, int* output_token, int vocab_size, int k, float temperature) {
     extern __shared__ unsigned char smem_u8_logits[]; 
     float* top_k_scores = reinterpret_cast<float*>(smem_u8_logits);
-    int*   top_k_indices = reinterpret_cast<int*>(top_k_scores + k)
+    int*   top_k_indices = reinterpret_cast<int*>(top_k_scores + k);
 
     temperature = fmaxf(temperature, 1e-6f);
 
