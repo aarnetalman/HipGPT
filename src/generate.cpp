@@ -14,7 +14,8 @@ static void usage(const char* prog){
     std::cout << "Usage: " << prog
               << " --prompt \"<text>\""
               << " [--num_tokens N=50]"
-              << " [--max_seq_len N=32]"
+              << " [--max_seq_len N=32]        # generation window on host"
+              << " [--model_seq_len N]          # model context length (must match ckpt)"
               << " [--ckpt PATH=gpt_checkpoint.bin]"
               << " [--tokenizer PATH=tokenizer.json]"
               << " [--top_k N=5]"
@@ -22,7 +23,8 @@ static void usage(const char* prog){
               << " [--eos_id ID=-1]"
               << " [--stream true|false]"
               << " [--delay_ms N=0]"
-              << std::endl;
+              << " [--vocab N]                  # override tokenizer vocab if needed"
+              << " [--dim N] [--heads N] [--ff N] [--layers N]   # MUST match ckpt\n";
 }
 
 static std::unordered_map<std::string,std::string> parse_args(int argc, char** argv){
@@ -40,61 +42,93 @@ static std::unordered_map<std::string,std::string> parse_args(int argc, char** a
     return a;
 }
 
+static int to_i(const std::unordered_map<std::string,std::string>& a,
+                const char* key, int defv){
+    auto it=a.find(key); return (it==a.end()?defv:std::atoi(it->second.c_str()));
+}
+static float to_f(const std::unordered_map<std::string,std::string>& a,
+                  const char* key, float defv){
+    auto it=a.find(key); return (it==a.end()?defv:std::stof(it->second.c_str()));
+}
+static std::string to_s(const std::unordered_map<std::string,std::string>& a,
+                        const char* key, const char* defv){
+    auto it=a.find(key); return (it==a.end()?std::string(defv):it->second);
+}
+
 int main(int argc, char** argv){
     auto args = parse_args(argc, argv);
     if(!args.count("--prompt")){ usage(argv[0]); return 1; }
 
-    std::string prompt       = args["--prompt"];
-    std::string ckpt_path    = args.count("--ckpt")      ? args["--ckpt"]      : "gpt_checkpoint.bin";
-    std::string tok_path     = args.count("--tokenizer") ? args["--tokenizer"] : "tokenizer.json";
-    int         num_tokens   = args.count("--num_tokens")? std::atoi(args["--num_tokens"].c_str()) : 50;
-    int         max_seq_len  = args.count("--max_seq_len")?std::atoi(args["--max_seq_len"].c_str()): 32;
-    int         top_k        = args.count("--top_k")     ? std::atoi(args["--top_k"].c_str())       : 5;
-    float       temperature  = args.count("--temp")      ? std::stof(args["--temp"].c_str())        : 1.0f;
-    int         eos_id       = args.count("--eos_id")    ? std::atoi(args["--eos_id"].c_str())      : -1;
-    bool        stream       = args.count("--stream")    ? (args["--stream"]=="true")               : true;
-    int         delay_ms     = args.count("--delay_ms")  ? std::atoi(args["--delay_ms"].c_str())    : 0;
+    // I/O & sampling args
+    std::string prompt       = to_s(args,"--prompt","");
+    std::string ckpt_path    = to_s(args,"--ckpt","gpt_checkpoint.bin");
+    std::string tok_path     = to_s(args,"--tokenizer","tokenizer.json");
+    int   num_tokens         = to_i(args,"--num_tokens",50);
+    int   host_max_seq_len   = to_i(args,"--max_seq_len",32);   // trimming window for generation
+    int   top_k              = to_i(args,"--top_k",5);
+    float temperature        = to_f(args,"--temp",1.0f);
+    int   eos_id             = to_i(args,"--eos_id",-1);
+    bool  stream             = (to_s(args,"--stream","true")=="true");
+    int   delay_ms           = to_i(args,"--delay_ms",0);
 
     if(num_tokens <= 0) num_tokens = 1;
-    if(max_seq_len <= 1) max_seq_len = 2;
+    if(host_max_seq_len <= 1) host_max_seq_len = 2;
     if(top_k < 1) top_k = 1;
     if(temperature <= 0.f) temperature = 1.f;
 
-    // Load tokenizer (host side)
+    // Model shape — MUST match the checkpoint
+    int embed_dim       = to_i(args,"--dim",256);
+    int num_heads       = to_i(args,"--heads",4);
+    int ff_hidden_dim   = to_i(args,"--ff",1024);
+    int num_layers      = to_i(args,"--layers",4);
+    int model_max_seq   = to_i(args,"--model_seq_len",256); // model’s context length
+    // Tokenizer / vocab
     Tokenizer tokenizer;
     tokenizer.load(tok_path);
-    int vocab_size = tokenizer.vocab_size();
+    int vocab_size_tok  = tokenizer.vocab_size();
+    int vocab_size      = args.count("--vocab") ? to_i(args,"--vocab",vocab_size_tok) : vocab_size_tok;
+
+    // Print the resolved config so mismatches are obvious
+    std::cerr << "[generate] ckpt=" << ckpt_path
+              << " dim=" << embed_dim
+              << " heads=" << num_heads
+              << " ff=" << ff_hidden_dim
+              << " layers=" << num_layers
+              << " model_seq_len=" << model_max_seq
+              << " vocab=" << vocab_size
+              << " host_window=" << host_max_seq_len
+              << " top_k=" << top_k
+              << " temp=" << temperature
+              << std::endl;
 
     std::cout << "Prompt: " << prompt << "\nGenerated: " << std::flush;
 
     {
-        // Keep HIP-owning objects in a scope so they destruct before hipDeviceReset()
-        // Use the same architecture as training (adjust if your checkpoint carries shape info)
-        int embed_dim = 128, num_heads = 4, ff_hidden_dim = 256, num_layers = 2;
+        // Construct model with the **same** hyperparameters used for training
+        GPTModel model(vocab_size, model_max_seq, embed_dim, num_heads, ff_hidden_dim, num_layers);
+        model.load_checkpoint(ckpt_path); // will throw if shapes don’t match
 
-        GPTModel model(vocab_size, max_seq_len, embed_dim, num_heads, ff_hidden_dim, num_layers);
-        model.load_checkpoint(ckpt_path);
-
-        // Encode and trim to leave room for at least one new token
+        // Encode and trim to leave room for at least one new token (on host side)
         std::vector<int> input_ids = tokenizer.encode(prompt);
         if(input_ids.empty()){
             std::cerr << "\nError: prompt produced no tokens.\n";
             hipDeviceSynchronize();
-            // model dtor runs here at scope end
             goto after_model;
         }
-        if((int)input_ids.size() >= max_seq_len){
-            // keep only the last max_seq_len-1 tokens so generation has room
+
+        // Trim to the smaller of host_max_seq_len and model_max_seq so we never exceed model context
+        int gen_window = std::min(host_max_seq_len, model_max_seq);
+        if((int)input_ids.size() >= gen_window){
             input_ids.erase(
                 input_ids.begin(),
-                input_ids.begin() + (int)input_ids.size() - (max_seq_len - 1)
+                input_ids.begin() + (int)input_ids.size() - (gen_window - 1)
             );
         }
 
-        // Run your existing generate() which must respect num_tokens
+        // Generate
         std::vector<int> generated_ids = model.generate(input_ids, num_tokens, top_k, temperature);
 
-        // Stream / print only the newly generated tail
+        // Print only the newly generated tail
         size_t start = input_ids.size();
         for(size_t i = start; i < generated_ids.size(); ++i){
             if(eos_id >= 0 && generated_ids[i] == eos_id) break;
@@ -104,12 +138,10 @@ int main(int argc, char** argv){
         }
         std::cout << std::endl;
 
-        // Ensure all GPU work is finished before destructors
         hipDeviceSynchronize();
     }
 
 after_model:
-    // Now it's safe to reset the device (all HIP resources have been destroyed)
     hipDeviceReset();
     return 0;
 }
