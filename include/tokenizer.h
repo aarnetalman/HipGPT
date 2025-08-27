@@ -5,8 +5,6 @@
 #include <map>
 #include <utility>
 
-struct PairHash; // forward declare
-
 class Tokenizer {
 public:
     Tokenizer(int vocab_limit = 5000);
@@ -30,8 +28,8 @@ private:
     // cache for encoding
     std::unordered_map<std::string, std::vector<std::string>> token_cache;
 
-    // merge order (string pairs → rank)
-    std::map<std::pair<std::string, std::string>, int> merge_rank;
+    // merge order (id pairs → rank)
+    std::map<std::pair<int,int>, int> merge_rank;
 
     // helpers
     std::vector<std::string> split_word(const std::string& word);

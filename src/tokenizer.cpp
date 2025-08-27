@@ -162,26 +162,42 @@ void Tokenizer::train_bpe(const std::string& text) {
 // ------------------- encoding ---------------------
 std::vector<std::string> Tokenizer::encode_word_as_tokens(const std::string& word){
     if(token_cache.count(word)) return token_cache[word];
-    std::vector<std::string> toks=split_word(word);
-    // greedy merge by merge_rank
-    while(toks.size()>1){
-        std::pair<std::string,std::string> best; int best_rank=INT_MAX;
-        for(size_t i=0;i+1<toks.size();++i){
-            auto cand=std::make_pair(toks[i],toks[i+1]);
-            if(merge_rank.count(cand)&&merge_rank[cand]<best_rank){
-                best_rank=merge_rank[cand]; best=cand;
+    std::vector<std::string> toks = split_word(word);
+    
+    while(toks.size() > 1){
+        std::pair<int,int> best_pair;
+        int best_rank = INT_MAX;
+        
+        for(size_t i = 0; i + 1 < toks.size(); ++i){
+            // Convert string tokens to int IDs for lookup
+            if(token_to_stoi.count(toks[i]) && token_to_stoi.count(toks[i+1])){
+                auto int_pair = std::make_pair(token_to_stoi[toks[i]], token_to_stoi[toks[i+1]]);
+                if(merge_rank.count(int_pair) && merge_rank[int_pair] < best_rank){
+                    best_rank = merge_rank[int_pair];
+                    best_pair = int_pair;
+                }
             }
         }
-        if(best_rank==INT_MAX) break;
+        
+        if(best_rank == INT_MAX) break;
+        
+        // Convert back to strings for merging
+        std::string first_token = stoi_to_token[best_pair.first];
+        std::string second_token = stoi_to_token[best_pair.second];
+        
         std::vector<std::string> newt;
-        for(size_t i=0;i<toks.size();){
-            if(i+1<toks.size() && toks[i]==best.first && toks[i+1]==best.second){
-                newt.push_back(best.first+best.second); i+=2;
-            } else { newt.push_back(toks[i]); i++; }
+        for(size_t i = 0; i < toks.size();){
+            if(i + 1 < toks.size() && toks[i] == first_token && toks[i+1] == second_token){
+                newt.push_back(first_token + second_token);
+                i += 2;
+            } else {
+                newt.push_back(toks[i]);
+                i++;
+            }
         }
         toks.swap(newt);
     }
-    return token_cache[word]=toks;
+    return token_cache[word] = toks;
 }
 
 std::vector<int> Tokenizer::encode(const std::string& text){
@@ -207,27 +223,58 @@ std::string Tokenizer::decode(const std::vector<int>& ids){
 }
 
 // ------------------- save/load ---------------------
-void Tokenizer::save(const std::string& path) const{
+// ------------------- save/load ---------------------
+void Tokenizer::save(const std::string& path) const {
     json j;
-    j["stoi_to_token"]=stoi_to_token;
-    json merges=json::array();
-    for(auto& kv:merge_rank)
-        merges.push_back({kv.first.first,kv.first.second,kv.second});
-    j["merge_rank"]=merges;
-    std::ofstream out(path); out<<j.dump(2);
+    j["stoi_to_token"] = stoi_to_token;
+
+    // Save merge ranks as array of [token_str1, token_str2, rank]
+    json merges = json::array();
+    for (auto& kv : merge_rank) {
+        merges.push_back({
+            stoi_to_token[kv.first.first],
+            stoi_to_token[kv.first.second],
+            kv.second
+        });
+    }
+    j["merge_rank"] = merges;
+
+    std::ofstream out(path);
+    out << j.dump(2);
 }
-void Tokenizer::load(const std::string& path){
+
+void Tokenizer::load(const std::string& path) {
     std::ifstream in(path);
-    if(!in){std::cerr<<"Cannot open "<<path<<"\n";return;}
-    json j; in>>j;
-    stoi_to_token=j["stoi_to_token"].get<std::vector<std::string>>();
+    if (!in) {
+        std::cerr << "Cannot open " << path << "\n";
+        return;
+    }
+    json j;
+    in >> j;
+
+    // Rebuild vocab
+    stoi_to_token = j["stoi_to_token"].get<std::vector<std::string>>();
     token_to_stoi.clear();
-    for(size_t i=0;i<stoi_to_token.size();++i) token_to_stoi[stoi_to_token[i]]=i;
+    for (size_t i = 0; i < stoi_to_token.size(); ++i)
+        token_to_stoi[stoi_to_token[i]] = i;
+
+    // Rebuild merge ranks
     merge_rank.clear();
-    if(j.contains("merge_rank")){
-        for(auto& mr:j["merge_rank"]){
-            merge_rank[{mr[0],mr[1]}]=mr[2];
+    if (j.contains("merge_rank")) {
+        for (auto& mr : j["merge_rank"]) {
+            std::string tok1 = mr[0].get<std::string>();
+            std::string tok2 = mr[1].get<std::string>();
+            
+            if (token_to_stoi.count(tok1) && token_to_stoi.count(tok2)) {
+                int id1 = token_to_stoi[tok1];
+                int id2 = token_to_stoi[tok2];
+                int rank = mr[2].get<int>();
+                merge_rank[{id1, id2}] = rank;
+            } else {
+                std::cerr << "Warning: merge pair (" << tok1 << ", " << tok2 << ") not found in vocab\n";
+            }
         }
     }
+
     token_cache.clear();
 }
