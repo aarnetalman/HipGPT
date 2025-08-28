@@ -162,7 +162,8 @@ void GPTModel::backward(const int* d_input_ids,
             d_last_grad,          // grad wrt layer_i output (in)
             d_last_grad,          // grad wrt layer_i input  (out, reuse buffer)
             batch_size, seq_len,
-            /*learning_rate=*/0.0f
+            /*learning_rate=*/0.0f,
+            adam_t
         );
     }
 
