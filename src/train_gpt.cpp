@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
 
         // ---- Training loop ----
         int cursor = 0;
-        int adam_t + 0;
+        int adam_t = 0;
         for (int step = 0; step < num_steps; ++step) {
             for (int b = 0; b < batch_size; ++b) {
                 for (int t = 0; t < max_seq_len; ++t) {
