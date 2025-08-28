@@ -1271,3 +1271,63 @@ void launch_multihead_attention_backward(
     hipLaunchKernelGGL(multihead_attention_backward_kernel, blocks, threads, 0, 0,
         d_grad_attn_output, d_Q, d_K, d_V, d_grad_Q, d_grad_K, d_grad_V, B, S, E, H);
 }
+
+// ============================================================================
+// Gradient clipping (device-side): L2 accumulate and scaling
+// ============================================================================
+__global__ void l2_accumulate_kernel(const float* __restrict__ g,
+                                     int n,
+                                     float* __restrict__ total_out) {
+    // Blocked grid-stride loop + block reduction -> one atomic per block
+    float local = 0.0f;
+
+    // grid-stride
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < n;
+         i += blockDim.x * gridDim.x) {
+        float v = g[i];
+        local += v * v;
+    }
+
+    // Block reduction in shared memory
+    extern __shared__ float shmem[];
+    float* sh = shmem; // size == blockDim.x
+    int tid = threadIdx.x;
+
+    sh[tid] = local;
+    __syncthreads();
+
+    // power-of-two reduction
+    for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) sh[tid] += sh[tid + offset];
+        __syncthreads();
+    }
+
+    if (tid == 0) atomicAdd(total_out, sh[0]);
+}
+
+__global__ void scale_inplace_kernel(float* __restrict__ g, int n, float scale) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < n;
+         i += blockDim.x * gridDim.x) {
+        g[i] *= scale;
+    }
+}
+
+void launch_l2_accumulate(const float* grad, int n, float* d_total_norm_sq) {
+    // caller must hipMemset(d_total_norm_sq, 0, sizeof(float)) before the first call
+    if (n <= 0) return;
+    const int threads = 256;
+    const int blocks  = std::min( (n + threads - 1) / threads,  4096 ); // cap blocks
+    size_t shmem = threads * sizeof(float);
+    hipLaunchKernelGGL(l2_accumulate_kernel, dim3(blocks), dim3(threads), shmem, 0,
+                       grad, n, d_total_norm_sq);
+}
+
+void launch_scale_inplace(float* grad, int n, float scale) {
+    if (n <= 0 || scale == 1.0f) return;
+    const int threads = 256;
+    const int blocks  = std::min( (n + threads - 1) / threads,  4096 );
+    hipLaunchKernelGGL(scale_inplace_kernel, dim3(blocks), dim3(threads), 0, 0,
+                       grad, n, scale);
+}

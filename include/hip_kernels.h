@@ -55,3 +55,7 @@ void launch_multihead_attention_backward(
     const float* d_grad_attn_output, const float* d_qkv, const float* d_softmax,
     float* d_grad_qkv, int B, int S, int E, int H
 );
+
+// Gradient clipping 
+void launch_l2_accumulate(const float* grad, int n, float* d_total_norm_sq);
+void launch_scale_inplace(float* grad, int n, float scale);

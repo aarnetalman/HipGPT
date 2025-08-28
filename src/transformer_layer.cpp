@@ -246,9 +246,8 @@ void TransformerLayer::forward(const float* d_input, float* d_output, int batch_
     launch_add_inplace(d_output, d_ff2_output_, total_tokens * embed_dim_);
 }
 
-void TransformerLayer::backward(const float* d_input, const float* d_grad_output, float* d_grad_input, int batch_size, int seq_len, float lr) {
+void TransformerLayer::backward(const float* d_input, const float* d_grad_output, float* d_grad_input, int batch_size, int seq_len, float lr, int adam_t) {
     int total_tokens = total_tokens_;
-    int step_t = 1; // This should ideally be tracked globally
     
     // --- Backprop through Feed-Forward Block (Sub-layer 2) ---
     hipMemcpy(d_grad_input, d_grad_output, total_tokens * embed_dim_ * sizeof(float), hipMemcpyDeviceToDevice);
@@ -287,20 +286,20 @@ void TransformerLayer::backward(const float* d_input, const float* d_grad_output
     launch_add_inplace(d_grad_input, d_qkv_grad_input_, total_tokens * embed_dim_);
 
     // --- Apply Adam updates to all weights and parameters ---
-    launch_adam_update(d_ff2_weight_, d_ff2_grad_weight_, d_ff2_m_, d_ff2_v_, lr, 0.9f, 0.999f, 1e-8f, step_t, ff_hidden_dim_ * embed_dim_);
-    launch_adam_update(d_ff1_weight_, d_ff1_grad_weight_, d_ff1_m_, d_ff1_v_, lr, 0.9f, 0.999f, 1e-8f, step_t, embed_dim_ * ff_hidden_dim_);
-    launch_adam_update(d_qkv_weight_, d_qkv_grad_weight_, d_qkv_m_, d_qkv_v_, lr, 0.9f, 0.999f, 1e-8f, step_t, embed_dim_ * 3 * embed_dim_);
-    launch_adam_update(d_o_weight_, d_o_grad_weight_, d_o_m_, d_o_v_, lr, 0.9f, 0.999f, 1e-8f, step_t, embed_dim_ * embed_dim_);
+    launch_adam_update(d_ff2_weight_, d_ff2_grad_weight_, d_ff2_m_, d_ff2_v_, lr, 0.9f, 0.999f, 1e-8f, adam_t, ff_hidden_dim_ * embed_dim_);
+    launch_adam_update(d_ff1_weight_, d_ff1_grad_weight_, d_ff1_m_, d_ff1_v_, lr, 0.9f, 0.999f, 1e-8f, adam_t, embed_dim_ * ff_hidden_dim_);
+    launch_adam_update(d_qkv_weight_, d_qkv_grad_weight_, d_qkv_m_, d_qkv_v_, lr, 0.9f, 0.999f, 1e-8f, adam_t, embed_dim_ * 3 * embed_dim_);
+    launch_adam_update(d_o_weight_, d_o_grad_weight_, d_o_m_, d_o_v_, lr, 0.9f, 0.999f, 1e-8f, adam_t, embed_dim_ * embed_dim_);
     
-    launch_adam_update(d_qkv_bias_, d_qkv_grad_bias_, d_qkv_m_, d_qkv_v_, lr, 0.9f, 0.999f, 1e-8f, step_t, 3 * embed_dim_);
-    launch_adam_update(d_o_bias_, d_o_grad_bias_, d_o_m_bias_, d_o_v_bias_, lr, 0.9f, 0.999f, 1e-8f, step_t, embed_dim_);
-    launch_adam_update(d_ff1_bias_, d_ff1_grad_bias_, d_ff1_m_, d_ff1_v_, lr, 0.9f, 0.999f, 1e-8f, step_t, ff_hidden_dim_);
-    launch_adam_update(d_ff2_bias_, d_ff2_grad_bias_, d_ff2_m_, d_ff2_v_, lr, 0.9f, 0.999f, 1e-8f, step_t, embed_dim_);
+    launch_adam_update(d_qkv_bias_, d_qkv_grad_bias_, d_qkv_m_, d_qkv_v_, lr, 0.9f, 0.999f, 1e-8f, adam_t, 3 * embed_dim_);
+    launch_adam_update(d_o_bias_, d_o_grad_bias_, d_o_m_bias_, d_o_v_bias_, lr, 0.9f, 0.999f, 1e-8f, adam_t, embed_dim_);
+    launch_adam_update(d_ff1_bias_, d_ff1_grad_bias_, d_ff1_m_, d_ff1_v_, lr, 0.9f, 0.999f, 1e-8f, adam_t, ff_hidden_dim_);
+    launch_adam_update(d_ff2_bias_, d_ff2_grad_bias_, d_ff2_m_, d_ff2_v_, lr, 0.9f, 0.999f, 1e-8f, adam_t, embed_dim_);
 
-    launch_adam_update(d_ffn_norm_gamma_, d_ffn_norm_grad_gamma_, d_ffn_norm_m_gamma_, d_ffn_norm_v_gamma_, lr, 0.9f, 0.999f, 1e-8f, step_t, embed_dim_);
-    launch_adam_update(d_ffn_norm_beta_, d_ffn_norm_grad_beta_, d_ffn_norm_m_beta_, d_ffn_norm_v_beta_, lr, 0.9f, 0.999f, 1e-8f, step_t, embed_dim_);
-    launch_adam_update(d_attn_norm_gamma_, d_attn_norm_grad_gamma_, d_attn_norm_m_gamma_, d_attn_norm_v_gamma_, lr, 0.9f, 0.999f, 1e-8f, step_t, embed_dim_);
-    launch_adam_update(d_attn_norm_beta_, d_attn_norm_grad_beta_, d_attn_norm_m_beta_, d_attn_norm_v_beta_, lr, 0.9f, 0.999f, 1e-8f, step_t, embed_dim_);
+    launch_adam_update(d_ffn_norm_gamma_, d_ffn_norm_grad_gamma_, d_ffn_norm_m_gamma_, d_ffn_norm_v_gamma_, lr, 0.9f, 0.999f, 1e-8f, adam_t, embed_dim_);
+    launch_adam_update(d_ffn_norm_beta_, d_ffn_norm_grad_beta_, d_ffn_norm_m_beta_, d_ffn_norm_v_beta_, lr, 0.9f, 0.999f, 1e-8f, adam_t, embed_dim_);
+    launch_adam_update(d_attn_norm_gamma_, d_attn_norm_grad_gamma_, d_attn_norm_m_gamma_, d_attn_norm_v_gamma_, lr, 0.9f, 0.999f, 1e-8f, adam_t, embed_dim_);
+    launch_adam_update(d_attn_norm_beta_, d_attn_norm_grad_beta_, d_attn_norm_m_beta_, d_attn_norm_v_beta_, lr, 0.9f, 0.999f, 1e-8f, adam_t, embed_dim_);
 }
 
 void TransformerLayer::save(std::ostream& os) const {

@@ -12,7 +12,7 @@ public:
     ~TransformerLayer();
 
     void forward(const float* d_input, float* d_output, int batch_size, int seq_len);
-    void backward(const float* d_input, const float* d_grad_output, float* d_grad_input, int batch_size, int seq_len, float lr);
+    void backward(const float* d_input, const float* d_grad_output, float* d_grad_input, int batch_size, int seq_len, float lr, int adam_t);
 
     // Serialize/deserialize weights
     void save(std::ostream& os) const;

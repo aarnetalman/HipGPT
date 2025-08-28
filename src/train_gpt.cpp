@@ -150,6 +150,7 @@ int main(int argc, char** argv) {
 
         // ---- Training loop ----
         int cursor = 0;
+        int adam_t + 0;
         for (int step = 0; step < num_steps; ++step) {
             for (int b = 0; b < batch_size; ++b) {
                 for (int t = 0; t < max_seq_len; ++t) {
@@ -172,8 +173,8 @@ int main(int argc, char** argv) {
                 total_tokens_per_batch, vocab_size
             );
             float acc = launch_accuracy(d_softmax_out, d_labels, total_tokens_per_batch, vocab_size);
-
-            model.backward(d_input_ids, d_loss_grad, batch_size, max_seq_len, learning_rate);
+            adam_t++;
+            model.backward(d_input_ids, d_loss_grad, batch_size, max_seq_len, learning_rate, adam_t);
 
             hipEventRecord(stop, 0);
             hipEventSynchronize(stop);

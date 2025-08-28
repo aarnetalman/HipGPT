@@ -16,7 +16,7 @@ public:
 
     // Training
     void backward(const int* d_input_ids, const float* d_logits_grad,
-                  int batch_size, int seq_len, float learning_rate);
+                  int batch_size, int seq_len, float learning_rate, int adam_t);
 
     // Generation
     std::vector<int> generate(const std::vector<int>& prompt_ids, int max_new_tokens, int top_k, float temperature);
