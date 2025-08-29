@@ -218,16 +218,6 @@ int main(int argc, char** argv) {
     {
         // ---- Model ----
         GPTModel model(vocab_size, max_seq_len, embed_dim, num_heads, ff_hidden_dim, num_layers);
-        if (args.count("--ckpt")) {
-            std::string ckpt_path = args["--ckpt"];
-            if (std::filesystem::exists(ckpt_path)) {
-                std::cout << "Loading checkpoint from " << ckpt_path << " ..." << std::endl;
-                model.load_checkpoint(ckpt_path);
-                std::cout << "Checkpoint loaded successfully." << std::endl;
-            } else {
-                std::cerr << "Warning: checkpoint " << ckpt_path << " not found, starting fresh.\n";
-            }
-        }
 
         // Allocate inputs and outputs
         std::vector<int> h_input_ids(total_tokens_per_batch);
@@ -253,7 +243,32 @@ int main(int argc, char** argv) {
         // ---- Training loop ----
         int cursor = 0;
         int adam_t = 0;
-        for (int step = 0; step < num_steps; ++step) {
+        int start_step = 0;
+
+        if (args.count("--ckpt")) {
+            std::string ckpt_path = args["--ckpt"];
+            if (std::filesystem::exists(ckpt_path)) {
+                std::cout << "Loading checkpoint from " << ckpt_path << " ..." << std::endl;
+                model.load_checkpoint(ckpt_path);
+                std::cout << "Checkpoint loaded successfully." << std::endl;
+
+                // --- load step number from config JSON ---
+                std::string cfg_path = std::filesystem::path(ckpt_path).parent_path() / "latest_config.json";
+                if (std::filesystem::exists(cfg_path)) {
+                    std::ifstream cfg_in(cfg_path);
+                    json cfg_json;
+                    cfg_in >> cfg_json;
+                    start_step = cfg_json["checkpoint"]["step"];
+                    std::cout << "Resuming from step " << start_step << std::endl;
+                }
+            } else {
+                std::cerr << "Warning: checkpoint " << ckpt_path << " not found, starting fresh.\n";
+            }
+        }
+
+
+        // Training loop now starts at start_step
+        for (int step = start_step + 1; step <= start_step + num_steps; ++step) {
             for (int b = 0; b < batch_size; ++b) {
                 for (int t = 0; t < max_seq_len; ++t) {
                     int idx = (cursor + t) % (tokens.size() - 1);
@@ -328,17 +343,20 @@ int main(int argc, char** argv) {
         hipEventDestroy(start);
         hipEventDestroy(stop);
 
-        std::string final_ckpt = run_dir + "/" + run_name + "_step" + std::to_string(num_steps) + ".bin";
+        int last_step = start_step + num_steps;
+
+        std::string final_ckpt = run_dir + "/" + run_name + "_step" + std::to_string(last_step) + ".bin";
         std::cout << "Saving final checkpoint to " << final_ckpt << " ..." << std::endl;
         model.save_checkpoint(final_ckpt);
 
-        std::string final_cfg = run_dir + "/" + run_name + "_step" + std::to_string(num_steps) + "_config.json";
+        std::string final_cfg = run_dir + "/" + run_name + "_step" + std::to_string(last_step) + "_config.json";
         save_config(final_cfg,
             vocab_size, max_seq_len, embed_dim, num_heads,
             ff_hidden_dim, num_layers,
             batch_size, learning_rate,
             run_tokenizer_path, run_tokens_path,
-            final_ckpt, num_steps);
+            final_ckpt, last_step);
+
 
         // Create/update symlinks "latest_checkpoint.bin" and "latest_config.json"
         std::error_code ec;
@@ -349,8 +367,8 @@ int main(int argc, char** argv) {
         fs::remove(latest_cfg, ec);
 
         // Use relative symlinks (inside run_dir)
-        fs::path ckpt_rel = fs::path(run_name + "_step" + std::to_string(num_steps) + ".bin");
-        fs::path cfg_rel  = fs::path(run_name + "_step" + std::to_string(num_steps) + "_config.json");
+        fs::path ckpt_rel = fs::path(run_name + "_step" + std::to_string(last_step) + ".bin");
+        fs::path cfg_rel  = fs::path(run_name + "_step" + std::to_string(last_step) + "_config.json");
 
         fs::create_symlink(ckpt_rel, latest_ckpt, ec);
         if (ec) {
