@@ -29,10 +29,10 @@ static std::unordered_map<std::string,std::string> parse_args(int argc, char** a
     for(int i=1;i<argc;++i){
         std::string k = argv[i];
         if(k.rfind("--",0)==0){
-            if(i+1<argc && std::string(argv[i+1]).rfind("--",0)!=0){
+            if(i+1<argc && argv[i+1][0] != '-'){  // next is a value, not another flag
                 a[k]=argv[++i];
-            }else{
-                a[k]="true";
+            } else {
+                a[k]="1";  // treat as boolean flag
             }
         }
     }
