@@ -253,7 +253,10 @@ int main(int argc, char** argv) {
                 std::cout << "Checkpoint loaded successfully." << std::endl;
 
                 // --- load step number from config JSON ---
-                std::string cfg_path = std::filesystem::path(ckpt_path).parent_path() / "latest_config.json";
+                // derive config file from checkpoint name
+                std::string ckpt_name = std::filesystem::path(ckpt_path).filename().string();
+                std::string cfg_name = std::regex_replace(ckpt_name, std::regex("\\.bin$"), "_config.json");
+                std::string cfg_path = std::filesystem::path(ckpt_path).parent_path() / cfg_name;
                 if (std::filesystem::exists(cfg_path)) {
                     std::ifstream cfg_in(cfg_path);
                     json cfg_json;
