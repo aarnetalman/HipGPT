@@ -32,12 +32,13 @@ static std::unordered_map<std::string,std::string> parse_args(int argc, char** a
             if(i+1<argc && argv[i+1][0] != '-'){  // next is a value, not another flag
                 a[k]=argv[++i];
             } else {
-                a[k]="1";  // treat as boolean flag
+                a[k]="true";  // treat as boolean flag
             }
         }
     }
     return a;
 }
+
 
 static int to_i(const std::unordered_map<std::string,std::string>& a,
                 const char* key, int defv){
