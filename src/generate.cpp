@@ -70,9 +70,6 @@ int main(int argc, char** argv){
 
     std::string run_name   = to_s(args,"--run-name","");
     int step               = to_i(args,"--step",-1);
-    float rep_penalty = to_f(args, "--rep-penalty", 1.1f);
-    float top_p       = to_f(args, "--top_p", 0.9f);
-
 
 
     // --- Resolve config path ---
