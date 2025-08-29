@@ -13,7 +13,7 @@
 [![C++](https://img.shields.io/badge/C++-17-blue.svg)](https://isocpp.org/)
 [![Documentation](https://img.shields.io/badge/docs-hipgpt.github.io-green.svg)](https://hipgpt.github.io)
 
-[📖 Documentation](https://hipgpt.github.io) - [🚀 Quick Start](#-quick-start) - [🎯 Examples](#-examples)
+[📖 Documentation](https://hipgpt.github.io) · [🚀 Quick Start](#-quick-start) · [🎯 Examples](#-examples)
 
 </div>
 
@@ -36,12 +36,13 @@ HipGPT is a **complete, educational implementation** of a GPT-2 style language m
 | **Custom BPE Tokenizer** | Trainable on any text corpus, built from scratch |
 | **Full Transformer Stack** | Multi-head attention, feed-forward layers, layer norm |
 | **HIP GPU Kernels** | Custom CUDA-alternative kernels for AMD hardware |
-| **Zero Dependencies** | Self-contained with automatic dependency management |
+| **FlashAttention** | Optimized attention kernels for head dims 32/64 (with fallback) |
+| **Self-Contained Build** | Automatic dependency management with CMake |
 | **Research Ready** | Modular design for easy experimentation |
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
 ### Prerequisites
 - **AMD GPU** with ROCm support  
@@ -66,9 +67,9 @@ make
 # 4. Train your model
 cd ..
 ./scripts/run_train.sh
-````
+```
 
-That's it! After training completes, you'll have a working language model ready for text generation.
+After training completes, you'll have a working language model ready for text generation.
 
 ---
 
@@ -112,31 +113,18 @@ Or to take arms against a sea of troubles..."
 
 ---
 
-### Core Components
-
-* **BPE Tokenizer:** Learns subword vocabulary from your training data
-* **Transformer Layers:** Multi-head self-attention + position-wise FFN
-* **HIP Kernels:** GPU-accelerated matrix operations, attention, and activations
-* **Training Loop:** Adam optimizer with gradient accumulation and checkpointing
-
----
-
 ## Model Specifications
 
-### Default Configuration
+### Default Configuration (\~28M params)
 
-```cpp
-Embedding Dimension:     128
-Number of Layers:        2
-Attention Heads:         4
-Feed-Forward Hidden:     256
-Vocabulary Size:         ~5,000
-Context Length:          32
 ```
-
-### Parameter Count
-
-**\~1.55M trainable parameters** (6.2 MB in FP32)
+E = 256   (embedding size)
+L = 8     (layers)
+H = 8     (attention heads)
+F = 1024  (feed-forward size)
+V ≈ 5k    (vocabulary size)
+S = 256   (sequence length)
+```
 
 Perfect size for:
 
@@ -147,29 +135,29 @@ Perfect size for:
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```
 HipGPT/
-├── 📁 include/           # Public API headers
-│   ├── gpt_model.h       # Main model interface
-│   ├── tokenizer.h       # BPE tokenizer
-│   └── hip_kernels.h     # GPU kernel declarations
-├── 📁 src/               # Implementation
-│   ├── train_gpt.cpp     # Training entry point
-│   ├── generate.cpp      # Text generation CLI
-│   ├── gpt_model.cpp     # Model orchestration
-│   └── hip_kernels.cpp   # GPU kernel implementations
-├── 📁 scripts/           # Automation
-│   ├── download_data.sh  # Dataset fetching
-│   └── run_train.sh      # Training pipeline
-└── 📁 data/              # Training data
+├── include/           # Public API headers
+│   ├── gpt_model.h
+│   ├── tokenizer.h
+│   └── hip_kernels.h
+├── src/               # Implementation
+│   ├── train_gpt.cpp
+│   ├── generate.cpp
+│   ├── gpt_model.cpp
+│   └── hip_kernels.cpp
+├── scripts/           # Automation scripts
+│   ├── download_data.sh
+│   └── run_train.sh
+└── data/              # Training data
     └── data.txt
 ```
 
 ---
 
-## 🔧 Advanced Usage
+## Advanced Usage
 
 ### Custom Datasets
 
@@ -184,18 +172,18 @@ HipGPT/
 # Experiment with model architecture
 ./build/train_gpt \
   --dim 256 \
-  --layers 4 \
+  --layers 8 \
   --heads 8 \
   --ff 1024 \
   --lr 3e-4 \
-  --batch 64
+  --batch 32
 ```
 
 ### Checkpointing
 
 ```bash
-# Training automatically saves gpt_checkpoint.bin
-# and periodic step checkpoints if --ckpt-every is set.
+# Training automatically saves checkpoints in /checkpoints/[run-name]
+# Includes symlinks to latest weights and configs.
 ```
 
 ---
