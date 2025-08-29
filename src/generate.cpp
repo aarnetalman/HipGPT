@@ -67,6 +67,10 @@ int main(int argc, char** argv){
 
     std::string run_name   = to_s(args,"--run-name","");
     int step               = to_i(args,"--step",-1);
+    float rep_penalty = to_f(args, "--rep-penalty", 1.1f);
+    float top_p       = to_f(args, "--top-p", 0.9f);
+
+
 
     // --- Resolve config path ---
     std::string run_dir = "checkpoints/" + run_name + "/";
@@ -140,7 +144,7 @@ int main(int argc, char** argv){
             );
         }
 
-        std::vector<int> generated_ids = model.generate(input_ids, num_tokens, top_k, temperature);
+        std::vector<int> generated_ids = model.generate(input_ids, num_tokens, top_k, temperature, rep_penalty, top_p);
 
         size_t start = input_ids.size();
         for(size_t i = start; i < generated_ids.size(); ++i){

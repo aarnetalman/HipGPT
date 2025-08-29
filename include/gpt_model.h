@@ -19,7 +19,12 @@ public:
                   int batch_size, int seq_len, float learning_rate, int adam_t);
 
     // Generation
-    std::vector<int> generate(const std::vector<int>& prompt_ids, int max_new_tokens, int top_k, float temperature);
+    std::vector<int> generate(const std::vector<int>& prompt_ids,
+                            int max_new_tokens,
+                            int top_k,
+                            float temperature,
+                            float rep_penalty = 1.1f,
+                            float top_p = 0.9f);
 
     // Checkpoints
     void save_checkpoint(const std::string& path) const;

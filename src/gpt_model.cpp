@@ -251,43 +251,110 @@ void GPTModel::backward(const int* d_input_ids,
 }
 
 
-std::vector<int> GPTModel::generate(const std::vector<int>& prompt_ids, int max_new_tokens, int top_k, float temperature) {
+std::vector<int> GPTModel::generate(const std::vector<int>& prompt_ids,
+                                    int max_new_tokens,
+                                    int top_k,
+                                    float temperature,
+                                    float rep_penalty,
+                                    float top_p) {
     std::vector<int> output = prompt_ids;
 
     int* d_input_ids;
     float* d_logits;
-    int* d_next_token;
     hipMalloc(&d_input_ids, max_seq_len_ * sizeof(int));
     hipMalloc(&d_logits, max_seq_len_ * vocab_size_ * sizeof(float));
-    hipMalloc(&d_next_token, sizeof(int));
 
     for (int step = 0; step < max_new_tokens; ++step) {
-        // Inefficient: Re-copies the entire context every time. A better approach uses a KV cache on the GPU.
+        // Pad/truncate input
         int cur_len = std::min((int)output.size(), max_seq_len_);
-        std::vector<int> input_ids(max_seq_len_, 0); // Pad with 0
-        std::copy(output.end() - cur_len, output.end(), input_ids.begin() + (max_seq_len_ - cur_len));
+        std::vector<int> input_ids(max_seq_len_, 0);
+        std::copy(output.end() - cur_len, output.end(),
+                  input_ids.begin() + (max_seq_len_ - cur_len));
 
-        hipMemcpy(d_input_ids, input_ids.data(), max_seq_len_ * sizeof(int), hipMemcpyHostToDevice);
+        hipMemcpy(d_input_ids, input_ids.data(),
+                  max_seq_len_ * sizeof(int),
+                  hipMemcpyHostToDevice);
 
+        // Forward
         forward(d_input_ids, d_logits, 1, max_seq_len_);
 
-        launch_sample_from_logits(
-            &d_logits[(max_seq_len_ - 1) * vocab_size_], // Logits for the last token
-            d_next_token,
-            vocab_size_,
-            top_k,
-            temperature
-        );
-        
-        int next_token;
-        hipMemcpy(&next_token, d_next_token, sizeof(int), hipMemcpyDeviceToHost);
+        // Copy last-token logits back to host
+        std::vector<float> h_logits(vocab_size_);
+        hipMemcpy(h_logits.data(),
+                  &d_logits[(max_seq_len_ - 1) * vocab_size_],
+                  vocab_size_ * sizeof(float),
+                  hipMemcpyDeviceToHost);
+
+        // ---- 1. Apply repetition penalty ----
+        for (int id : output) {
+            if (id >= 0 && id < vocab_size_) {
+                if (h_logits[id] > 0) h_logits[id] /= rep_penalty;
+                else                  h_logits[id] *= rep_penalty;
+            }
+        }
+
+        // ---- 2. Temperature scaling ----
+        for (float& x : h_logits) x /= temperature;
+
+        // ---- 3. Softmax ----
+        float max_logit = *std::max_element(h_logits.begin(), h_logits.end());
+        float sum = 0.0f;
+        for (float& x : h_logits) {
+            x = std::exp(x - max_logit);
+            sum += x;
+        }
+        for (float& x : h_logits) x /= sum;
+
+        // ---- 4. Top-k filter ----
+        if (top_k > 0 && top_k < vocab_size_) {
+            std::vector<int> idx(vocab_size_);
+            std::iota(idx.begin(), idx.end(), 0);
+            std::partial_sort(idx.begin(), idx.begin() + top_k, idx.end(),
+                              [&](int a, int b) { return h_logits[a] > h_logits[b]; });
+
+            std::vector<float> new_probs(vocab_size_, 0.0f);
+            float new_sum = 0.0f;
+            for (int i = 0; i < top_k; i++) {
+                new_probs[idx[i]] = h_logits[idx[i]];
+                new_sum += h_logits[idx[i]];
+            }
+            for (float& p : new_probs) p /= new_sum;
+            h_logits.swap(new_probs);
+        }
+
+        // ---- 5. Top-p (nucleus) filter ----
+        if (top_p < 1.0f) {
+            std::vector<int> idx(vocab_size_);
+            std::iota(idx.begin(), idx.end(), 0);
+            std::sort(idx.begin(), idx.end(),
+                      [&](int a, int b) { return h_logits[a] > h_logits[b]; });
+
+            float cum = 0.0f;
+            std::vector<float> new_probs(vocab_size_, 0.0f);
+            for (int i : idx) {
+                cum += h_logits[i];
+                new_probs[i] = h_logits[i];
+                if (cum >= top_p) break;
+            }
+            float new_sum = std::accumulate(new_probs.begin(), new_probs.end(), 0.0f);
+            for (float& p : new_probs) p /= new_sum;
+            h_logits.swap(new_probs);
+        }
+
+        // ---- 6. Sample token ----
+        float r = (float)rand() / RAND_MAX;
+        float cum = 0.0f;
+        int next_token = vocab_size_ - 1;
+        for (int i = 0; i < vocab_size_; i++) {
+            cum += h_logits[i];
+            if (r <= cum) { next_token = i; break; }
+        }
+
         output.push_back(next_token);
     }
 
     hipFree(d_input_ids);
     hipFree(d_logits);
-    hipFree(d_next_token);
-
     return output;
 }
 

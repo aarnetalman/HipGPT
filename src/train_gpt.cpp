@@ -307,21 +307,19 @@ int main(int argc, char** argv) {
                 prune_old_checkpoints(run_dir, run_name, keep_last);
                 // Create/update symlinks "latest_checkpoint.bin" and "latest_config.json"
                 std::error_code ec;
+                // Instead of storing full ckpt_fname, make them relative to run_dir
+                fs::path ckpt_rel = fs::path(run_name + "_step" + std::to_string(step) + ".bin");
+                fs::path cfg_rel  = fs::path(run_name + "_step" + std::to_string(step) + "_config.json");
+
                 fs::path latest_ckpt = fs::path(run_dir) / "latest_checkpoint.bin";
                 fs::path latest_cfg  = fs::path(run_dir) / "latest_config.json";
 
-                fs::remove(latest_ckpt, ec);  // ignore errors if missing
+                fs::remove(latest_ckpt, ec);
                 fs::remove(latest_cfg, ec);
 
-                fs::create_symlink(ckpt_fname, latest_ckpt, ec);
-                if (ec) {
-                    std::cerr << "Warning: failed to symlink " << latest_ckpt << " (" << ec.message() << ")\n";
-                }
+                fs::create_symlink(ckpt_rel, latest_ckpt, ec);
+                fs::create_symlink(cfg_rel, latest_cfg, ec);
 
-                fs::create_symlink(cfg_fname, latest_cfg, ec);
-                if (ec) {
-                    std::cerr << "Warning: failed to symlink " << latest_cfg << " (" << ec.message() << ")\n";
-                }
 
             }
 
@@ -347,15 +345,19 @@ int main(int argc, char** argv) {
         fs::path latest_ckpt = fs::path(run_dir) / "latest_checkpoint.bin";
         fs::path latest_cfg  = fs::path(run_dir) / "latest_config.json";
 
-        fs::remove(latest_ckpt, ec);  // ignore errors if missing
+        fs::remove(latest_ckpt, ec);
         fs::remove(latest_cfg, ec);
 
-        fs::create_symlink(final_ckpt, latest_ckpt, ec);
+        // Use relative symlinks (inside run_dir)
+        fs::path ckpt_rel = fs::path(run_name + "_step" + std::to_string(num_steps) + ".bin");
+        fs::path cfg_rel  = fs::path(run_name + "_step" + std::to_string(num_steps) + "_config.json");
+
+        fs::create_symlink(ckpt_rel, latest_ckpt, ec);
         if (ec) {
             std::cerr << "Warning: failed to symlink " << latest_ckpt << " (" << ec.message() << ")\n";
         }
 
-        fs::create_symlink(final_cfg, latest_cfg, ec);
+        fs::create_symlink(cfg_rel, latest_cfg, ec);
         if (ec) {
             std::cerr << "Warning: failed to symlink " << latest_cfg << " (" << ec.message() << ")\n";
         }
