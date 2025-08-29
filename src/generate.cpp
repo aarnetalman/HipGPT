@@ -8,17 +8,16 @@
 #include <string>
 #include <cstdlib>
 #include <unordered_map>
-#include <chrono>
-#include <thread>
 #include <nlohmann/json.hpp>
 #include <filesystem>
+
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 static void usage(const char* prog){
     std::cout << "Usage: " << prog
               << " --prompt \"<text>\""
-              << " --run-name NAME --step N"
+              << " --run-name NAME [--step N (default: latest)]"
               << " [--num_tokens N=50]"
               << " [--max_seq_len N=32]        # host-side gen window"
               << " [--top_k N=5] [--temp F=1.0] [--eos_id ID=-1]\n";
@@ -29,16 +28,15 @@ static std::unordered_map<std::string,std::string> parse_args(int argc, char** a
     for(int i=1;i<argc;++i){
         std::string k = argv[i];
         if(k.rfind("--",0)==0){
-            if(i+1<argc && argv[i+1][0] != '-'){  // next is a value, not another flag
+            if(i+1<argc && argv[i+1][0] != '-'){  
                 a[k]=argv[++i];
             } else {
-                a[k]="true";  // treat as boolean flag
+                a[k]="true";
             }
         }
     }
     return a;
 }
-
 
 static int to_i(const std::unordered_map<std::string,std::string>& a,
                 const char* key, int defv){
@@ -55,7 +53,7 @@ static std::string to_s(const std::unordered_map<std::string,std::string>& a,
 
 int main(int argc, char** argv){
     auto args = parse_args(argc, argv);
-    if(!args.count("--prompt") || !args.count("--run-name") || !args.count("--step")){
+    if(!args.count("--prompt") || !args.count("--run-name")){
         usage(argv[0]); return 1;
     }
 
@@ -70,13 +68,16 @@ int main(int argc, char** argv){
     std::string run_name   = to_s(args,"--run-name","");
     int step               = to_i(args,"--step",-1);
 
-    if(step < 0){
-        std::cerr << "Error: you must provide --step N\n";
-        return 1;
+    // --- Resolve config path ---
+    std::string run_dir = "checkpoints/" + run_name + "/";
+    std::string cfg_path;
+
+    if(step >= 0){
+        cfg_path = run_dir + run_name + "_step" + std::to_string(step) + "_config.json";
+    } else {
+        cfg_path = run_dir + "latest_config.json";
     }
 
-    // --- Load config for that step ---
-    std::string cfg_path = "checkpoints/" + run_name + "/" + run_name + "_step" + std::to_string(step) + "_config.json";
     if(!fs::exists(cfg_path)){
         std::cerr << "Error: config not found at " << cfg_path << "\n";
         return 1;
@@ -92,9 +93,10 @@ int main(int argc, char** argv){
     int ff_hidden_dim  = config["model"]["ff_hidden_dim"];
     int num_layers     = config["model"]["num_layers"];
 
-    std::string tok_path    = config["tokenizer"]["path"];
-    std::string tokens_path = config["tokenizer"]["tokens_path"];
-    std::string ckpt_path   = config["checkpoint"]["latest"];
+    // resolve relative paths inside run folder
+    std::string tok_path   = run_dir + config["tokenizer"]["path"].get<std::string>();
+    std::string tokens_path= run_dir + config["tokenizer"]["tokens_path"].get<std::string>();
+    std::string ckpt_path  = run_dir + config["checkpoint"]["latest"].get<std::string>();
 
     std::cerr << "[generate] Loaded config " << cfg_path << "\n";
 

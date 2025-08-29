@@ -35,6 +35,11 @@ void save_config(const std::string& path,
                  const std::string& tokens_path,
                  const std::string& ckpt_path,
                  int step) {
+    // save only the basenames, not full paths
+    std::string tok_file   = std::filesystem::path(tokenizer_path).filename().string();
+    std::string tokens_file= std::filesystem::path(tokens_path).filename().string();
+    std::string ckpt_file  = std::filesystem::path(ckpt_path).filename().string();
+
     json config = {
         {"model", {
             {"vocab_size", vocab_size},
@@ -45,8 +50,8 @@ void save_config(const std::string& path,
             {"num_layers", num_layers}
         }},
         {"tokenizer", {
-            {"path", tokenizer_path},
-            {"tokens_path", tokens_path}
+            {"path", tok_file},
+            {"tokens_path", tokens_file}
         }},
         {"training", {
             {"batch_size", batch_size},
@@ -54,7 +59,7 @@ void save_config(const std::string& path,
             {"steps", step}
         }},
         {"checkpoint", {
-            {"latest", ckpt_path},
+            {"latest", ckpt_file},
             {"step", step}
         }}
     };
@@ -64,7 +69,8 @@ void save_config(const std::string& path,
 }
 
 
-// keep only the newest `keep_last` step-checkpoints; don't touch gpt_checkpoint.bin
+// keep only the newest `keep_last` step-checkpoints (bin+config)
+// always preserve the newest one even if keep_last <= 0
 void prune_old_checkpoints(const std::string& dir, const std::string& prefix, int keep_last) {
     namespace fs = std::filesystem;
     std::vector<std::pair<fs::file_time_type, fs::path>> step_ckpts;
@@ -78,21 +84,42 @@ void prune_old_checkpoints(const std::string& dir, const std::string& prefix, in
             step_ckpts.emplace_back(fs::last_write_time(p.path()), p.path());
         }
     }
-    if ((int)step_ckpts.size() <= keep_last) return;
+    if (step_ckpts.empty()) return;
 
     // newest first
     std::sort(step_ckpts.begin(), step_ckpts.end(),
               [](auto& a, auto& b){ return a.first > b.first; });
 
-    for (size_t i = keep_last; i < step_ckpts.size(); ++i) {
+    // ensure at least 1 is always kept
+    int limit = std::max(1, keep_last);
+
+    for (size_t i = limit; i < step_ckpts.size(); ++i) {
+        const fs::path ckpt_bin = step_ckpts[i].second;
+        const std::string bin_name = ckpt_bin.filename().string();
+
+        // Derive config filename (replace .bin with _config.json)
+        std::string cfg_name = std::regex_replace(bin_name, std::regex("\\.bin$"), "_config.json");
+        fs::path cfg_path = ckpt_bin.parent_path() / cfg_name;
+
         std::error_code ec;
-        std::cout << "Pruning old checkpoint: " << step_ckpts[i].second.filename().string() << std::endl;
-        std::filesystem::remove(step_ckpts[i].second, ec);
+        std::cout << "Pruning old checkpoint: " << bin_name << std::endl;
+        fs::remove(ckpt_bin, ec);
         if (ec) {
-            std::cerr << "Warning: failed to remove " << step_ckpts[i].second << " (" << ec.message() << ")\n";
+            std::cerr << "Warning: failed to remove " << ckpt_bin << " (" << ec.message() << ")\n";
+        }
+
+        // Try to remove config too
+        ec.clear();
+        if (fs::exists(cfg_path)) {
+            std::cout << "Pruning old config: " << cfg_name << std::endl;
+            fs::remove(cfg_path, ec);
+            if (ec) {
+                std::cerr << "Warning: failed to remove " << cfg_path << " (" << ec.message() << ")\n";
+            }
         }
     }
 }
+
 
 // Simple CLI argument parser
 std::unordered_map<std::string, std::string> parse_args(int argc, char** argv) {
@@ -142,17 +169,23 @@ int main(int argc, char** argv) {
 
     // ---- Tokenizer + Dataset ----
     Tokenizer tokenizer(vocab_size_limit);
-
     std::vector<int> tokens;
 
-    if (!force_reset && std::filesystem::exists(tokenizer_path) && std::filesystem::exists(tokens_path)) {
-        tokenizer.load(tokenizer_path);
-        std::ifstream in(tokens_path, std::ios::binary);
+    // Tokenizer + dataset paths inside run directory
+    std::string run_tokenizer_path = run_dir + "/tokenizer.json";
+    std::string run_tokens_path    = run_dir + "/tokens.bin";
+
+    bool tokenizer_exists = std::filesystem::exists(run_tokenizer_path) && 
+                            std::filesystem::exists(run_tokens_path);
+
+    if (!force_reset && tokenizer_exists) {
+        tokenizer.load(run_tokenizer_path);
+        std::ifstream in(run_tokens_path, std::ios::binary);
         int id;
         while (in.read(reinterpret_cast<char*>(&id), sizeof(int))) {
             tokens.push_back(id);
         }
-        std::cout << "Loaded tokenizer and tokenized dataset (" << tokens.size() << " tokens)\n";
+        std::cout << "Loaded existing tokenizer and dataset (" << tokens.size() << " tokens)\n";
     } else {
         std::ifstream file(data_path);
         if (!file) {
@@ -164,20 +197,21 @@ int main(int argc, char** argv) {
         std::string text = buffer.str();
 
         tokenizer.train_bpe(text);
-        tokenizer.save(tokenizer_path);
+        tokenizer.save(run_tokenizer_path);
         tokens = tokenizer.encode(text);
 
-        std::ofstream out(tokens_path, std::ios::binary);
+        std::ofstream out(run_tokens_path, std::ios::binary);
         for (int id : tokens) {
             out.write(reinterpret_cast<const char*>(&id), sizeof(int));
         }
-        std::cout << "Trained tokenizer and saved " << tokens.size() << " tokens\n";
+        std::cout << "Trained tokenizer and saved (" << tokens.size() << " tokens)\n";
     }
 
     int vocab_size = tokenizer.vocab_size();
     int total_tokens_per_batch = batch_size * max_seq_len;
 
     std::cout << "Using vocab size: " << vocab_size << std::endl;
+
 
     {
         // ---- Model ----
@@ -259,16 +293,34 @@ int main(int argc, char** argv) {
                 std::string ckpt_fname = run_dir + "/" + run_name + "_step" + std::to_string(step) + ".bin";
                 std::cout << "Saving checkpoint to " << ckpt_fname << " ..." << std::endl;
                 model.save_checkpoint(ckpt_fname);
-
-                save_config(run_dir + "/" + run_name + "_config.json",
+                std::string cfg_fname = run_dir + "/" + run_name + "_step" + std::to_string(step) + "_config.json";
+                save_config(cfg_fname,
                     vocab_size, max_seq_len, embed_dim, num_heads,
                     ff_hidden_dim, num_layers,
                     batch_size, learning_rate,
-                    tokenizer_path, tokens_path,
+                    run_tokenizer_path, run_tokens_path,
                     ckpt_fname, step);
                 std::cout << "Checkpoint saved." << std::endl;
 
                 prune_old_checkpoints(run_dir, run_name, keep_last);
+                // Create/update symlinks "latest_checkpoint.bin" and "latest_config.json"
+                std::error_code ec;
+                fs::path latest_ckpt = fs::path(run_dir) / "latest_checkpoint.bin";
+                fs::path latest_cfg  = fs::path(run_dir) / "latest_config.json";
+
+                fs::remove(latest_ckpt, ec);  // ignore errors if missing
+                fs::remove(latest_cfg, ec);
+
+                fs::create_symlink(ckpt_fname, latest_ckpt, ec);
+                if (ec) {
+                    std::cerr << "Warning: failed to symlink " << latest_ckpt << " (" << ec.message() << ")\n";
+                }
+
+                fs::create_symlink(cfg_fname, latest_cfg, ec);
+                if (ec) {
+                    std::cerr << "Warning: failed to symlink " << latest_cfg << " (" << ec.message() << ")\n";
+                }
+
             }
 
         }
@@ -285,10 +337,29 @@ int main(int argc, char** argv) {
             vocab_size, max_seq_len, embed_dim, num_heads,
             ff_hidden_dim, num_layers,
             batch_size, learning_rate,
-            tokenizer_path, tokens_path,
+            run_tokenizer_path, run_tokens_path,
             final_ckpt, num_steps);
 
+        // Create/update symlinks "latest_checkpoint.bin" and "latest_config.json"
+        std::error_code ec;
+        fs::path latest_ckpt = fs::path(run_dir) / "latest_checkpoint.bin";
+        fs::path latest_cfg  = fs::path(run_dir) / "latest_config.json";
+
+        fs::remove(latest_ckpt, ec);  // ignore errors if missing
+        fs::remove(latest_cfg, ec);
+
+        fs::create_symlink(final_ckpt, latest_ckpt, ec);
+        if (ec) {
+            std::cerr << "Warning: failed to symlink " << latest_ckpt << " (" << ec.message() << ")\n";
+        }
+
+        fs::create_symlink(final_cfg, latest_cfg, ec);
+        if (ec) {
+            std::cerr << "Warning: failed to symlink " << latest_cfg << " (" << ec.message() << ")\n";
+        }
+
         std::cout << "Checkpoint saved successfully." << std::endl;
+
 
         // Ensure all GPU work done before freeing raw buffers
         std::cout << "Synchronizing device before cleanup..." << std::endl;
