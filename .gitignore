@@ -46,9 +46,12 @@ gpt_checkpoint.bin
 tokenizer.json
 tokens.bin
 
+# Ignore the entire checkpoints folder (all runs and configs)
+checkpoints/
+
 # Ignore the concatenated dataset file, as it can be regenerated
-# by the download script.
 /data/data.txt
+
 
 # ===================================================================
 # Editor & OS Specific
