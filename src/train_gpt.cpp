@@ -8,7 +8,6 @@
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
-#include <filesystem>
 #include <regex>
 #include <algorithm>
 #include <string>
@@ -16,7 +15,10 @@
 #include <chrono>
 #include <iomanip>
 #include <nlohmann/json.hpp>
+#include <filesystem>
+
 using json = nlohmann::json;
+namespace fs = std::filesystem;
 
 
 std::string timestamp() {
