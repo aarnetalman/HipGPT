@@ -11,6 +11,7 @@
 #include <cmath>
 #include <thread>
 #include <chrono>
+#include <numeric>
 
 
 GPTModel::GPTModel(int vocab_size, int max_seq_len, int embed_dim, int num_heads, int ff_hidden_dim, int num_layers)
