@@ -13,22 +13,31 @@ fi
 
 # Print usage information if no arguments provided
 if [ $# -eq 0 ]; then
-    echo "Usage: $0 --prompt \"Your text here\" [options]"
-    echo "Example: $0 --prompt \"Once upon a time\" --num_tokens 100 --temp 0.8 --run-name tinyshakespeare"
+    echo "Usage: $0 --prompt \"Your text here\" --run-name NAME [options]"
+    echo "Example: $0 --prompt \"Once upon a time\" --run-name shakespeare_v1 --num_tokens 100 --temp 0.8"
     echo ""
-    echo "Options:"
+    echo "Required Options:"
     echo "  --prompt \"text\"       Text to generate from (required)"
-    echo "  --num_tokens N         Number of tokens to generate (default: 50)"
-    echo "  --max_seq_len N        Host-side generation window (default: 32)"
-    echo "  --ckpt PATH            Path to checkpoint file (loads matching *_config.json)"
-    echo "  --run-name NAME        Use latest config from checkpoints/NAME/"
-    echo "  --top_k N              Top-k sampling parameter (default: 5)"
-    echo "  --temp F               Temperature for sampling (default: 1.0)"
+    echo "  --run-name NAME        Training run name to use for generation (required)"
+    echo ""
+    echo "Optional Parameters (with defaults):"
+    echo "  --step N               Specific checkpoint step (default: latest)"
+    echo "  --num_tokens N         Number of tokens to generate (default: 100)"
+    echo "  --max_seq_len N        Host-side generation window (default: 256)"
+    echo "  --top_k N              Top-k sampling parameter (default: 50)"
+    echo "  --temp F               Temperature for sampling (default: 0.8)"
+    echo "  --top_p F              Nucleus sampling threshold (default: 0.9)"
+    echo "  --rep-penalty F        Repetition penalty (default: 1.1)"
     echo "  --eos_id ID            End-of-sequence token ID (default: -1, disabled)"
+    echo ""
+    echo "Examples:"
+    echo "  $0 --prompt \"Hello world\" --run-name my_model"
+    echo "  $0 --prompt \"The cat\" --run-name my_model --step 1000 --temp 0.8"
+    echo "  $0 --prompt \"Once upon\" --run-name story_model --num_tokens 200 --top_k 50"
     echo ""
     exit 1
 fi
 
 # Run generation executable from the build directory
-echo "Starting text generation..."
+echo "Starting text generation with run-based configuration..."
 ./build/generate "$@"

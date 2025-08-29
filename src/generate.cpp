@@ -58,17 +58,20 @@ int main(int argc, char** argv){
     }
 
     // I/O & sampling args
-    std::string prompt     = to_s(args,"--prompt","");
-    int num_tokens         = to_i(args,"--num_tokens",50);
-    int host_max_seq_len   = to_i(args,"--max_seq_len",32);
-    int top_k              = to_i(args,"--top_k",5);
-    float temperature      = to_f(args,"--temp",1.0f);
-    int eos_id             = to_i(args,"--eos_id",-1);
+    std::string prompt     = to_s(args,"--prompt",""); 
+    int num_tokens         = to_i(args,"--num_tokens",100);   // default 100 tokens
+    int host_max_seq_len   = to_i(args,"--max_seq_len",256);  // match training seq length
+    int top_k              = to_i(args,"--top_k",50);         // more natural sampling
+    float temperature      = to_f(args,"--temp",0.8f);        // slightly <1 for coherence
+    float rep_penalty      = to_f(args,"--rep-penalty",1.1f); // discourage repetition
+    float top_p            = to_f(args,"--top_p",0.9f);       // nucleus sampling
+    int eos_id             = to_i(args,"--eos_id",-1);        // leave off by default
+
 
     std::string run_name   = to_s(args,"--run-name","");
     int step               = to_i(args,"--step",-1);
     float rep_penalty = to_f(args, "--rep-penalty", 1.1f);
-    float top_p       = to_f(args, "--top-p", 0.9f);
+    float top_p       = to_f(args, "--top_p", 0.9f);
 
 
 

@@ -141,15 +141,16 @@ int main(int argc, char** argv) {
     auto args = parse_args(argc, argv);
 
     // Hyperparameters from CLI or defaults
-    int max_seq_len = args.count("--seq") ? std::stoi(args["--seq"]) : 32;
-    int embed_dim = args.count("--dim") ? std::stoi(args["--dim"]) : 128;
-    int num_heads = args.count("--heads") ? std::stoi(args["--heads"]) : 4;
-    int ff_hidden_dim = args.count("--ff") ? std::stoi(args["--ff"]) : 256;
-    int num_layers = args.count("--layers") ? std::stoi(args["--layers"]) : 2;
-    int batch_size = args.count("--batch") ? std::stoi(args["--batch"]) : 4;
-    int num_steps = args.count("--steps") ? std::stoi(args["--steps"]) : 10;
-    float learning_rate = args.count("--lr") ? std::stof(args["--lr"]) : 1e-2f;
+    int max_seq_len   = args.count("--seq")   ? std::stoi(args["--seq"])   : 256;
+    int embed_dim     = args.count("--dim")   ? std::stoi(args["--dim"])   : 256;
+    int num_heads     = args.count("--heads") ? std::stoi(args["--heads"]) : 8;
+    int ff_hidden_dim = args.count("--ff")    ? std::stoi(args["--ff"])    : 1024;
+    int num_layers    = args.count("--layers")? std::stoi(args["--layers"]): 8;
+    int batch_size    = args.count("--batch") ? std::stoi(args["--batch"]) : 32;
+    int num_steps     = args.count("--steps") ? std::stoi(args["--steps"]) : 50000;
+    float learning_rate = args.count("--lr")  ? std::stof(args["--lr"])    : 3e-4f;
     int vocab_size_limit = args.count("--vocab-size") ? std::stoi(args["--vocab-size"]) : 5000;
+
 
     // File paths from CLI or defaults
     std::string data_path = args.count("--data-path") ? args["--data-path"] : "data/data.txt";
@@ -212,8 +213,22 @@ int main(int argc, char** argv) {
     int vocab_size = tokenizer.vocab_size();
     int total_tokens_per_batch = batch_size * max_seq_len;
 
-    std::cout << "Using vocab size: " << vocab_size << std::endl;
-
+    std::cout << "----------------------------------------\n";
+    std::cout << "[Training Setup]\n";
+    std::cout << "Run name      : " << run_name << "\n";
+    std::cout << "Seq length    : " << max_seq_len << "\n";
+    std::cout << "Embed dim     : " << embed_dim << "\n";
+    std::cout << "Heads         : " << num_heads << "\n";
+    std::cout << "FF hidden dim : " << ff_hidden_dim << "\n";
+    std::cout << "Layers        : " << num_layers << "\n";
+    std::cout << "Batch size    : " << batch_size << "\n";
+    std::cout << "Learning rate : " << learning_rate << "\n";
+    std::cout << "Steps         : " << num_steps << "\n";
+    std::cout << "Vocab size    : " << vocab_size << "\n";
+    std::cout << "Tokenizer     : " << run_tokenizer_path << "\n";
+    std::cout << "Tokens file   : " << run_tokens_path << "\n";
+    std::cout << "Checkpoint dir: " << run_dir << "\n";
+    std::cout << "----------------------------------------\n";
 
     {
         // ---- Model ----
