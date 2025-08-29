@@ -2,6 +2,7 @@
 #include "tokenizer.h"
 #include <hip/hip_runtime.h>
 #include <iostream>
+#include <fstream>
 #include <sstream>
 #include <vector>
 #include <string>
@@ -9,22 +10,20 @@
 #include <unordered_map>
 #include <chrono>
 #include <thread>
+#include <filesystem>
+#include <nlohmann/json.hpp>
+
+namespace fs = std::filesystem;
+using json = nlohmann::json;
 
 static void usage(const char* prog){
     std::cout << "Usage: " << prog
               << " --prompt \"<text>\""
               << " [--num_tokens N=50]"
-              << " [--max_seq_len N=32]        # generation window on host"
-              << " [--model_seq_len N]          # model context length (must match ckpt)"
-              << " [--ckpt PATH=gpt_checkpoint.bin]"
-              << " [--tokenizer PATH=tokenizer.json]"
-              << " [--top_k N=5]"
-              << " [--temp F=1.0]"
-              << " [--eos_id ID=-1]"
-              << " [--stream true|false]"
-              << " [--delay_ms N=0]"
-              << " [--vocab N]                  # override tokenizer vocab if needed"
-              << " [--dim N] [--heads N] [--ff N] [--layers N]   # MUST match ckpt\n";
+              << " [--max_seq_len N=32]        # host-side gen window"
+              << " [--run-name NAME]            # load config+ckpt from checkpoints/NAME/"
+              << " [--ckpt PATH]                # optional checkpoint path"
+              << " [--top_k N=5] [--temp F=1.0] [--eos_id ID=-1]\n";
 }
 
 static std::unordered_map<std::string,std::string> parse_args(int argc, char** argv){
@@ -59,36 +58,71 @@ int main(int argc, char** argv){
     auto args = parse_args(argc, argv);
     if(!args.count("--prompt")){ usage(argv[0]); return 1; }
 
-    // I/O & sampling args
-    std::string prompt       = to_s(args,"--prompt","");
-    std::string ckpt_path    = to_s(args,"--ckpt","gpt_checkpoint.bin");
-    std::string tok_path     = to_s(args,"--tokenizer","tokenizer.json");
-    int   num_tokens         = to_i(args,"--num_tokens",50);
-    int   host_max_seq_len   = to_i(args,"--max_seq_len",32);   // trimming window for generation
-    int   top_k              = to_i(args,"--top_k",5);
-    float temperature        = to_f(args,"--temp",1.0f);
-    int   eos_id             = to_i(args,"--eos_id",-1);
-    bool  stream             = (to_s(args,"--stream","true")=="true");
-    int   delay_ms           = to_i(args,"--delay_ms",0);
+    // Sampling args
+    std::string prompt     = to_s(args,"--prompt","");
+    int num_tokens         = to_i(args,"--num_tokens",50);
+    int host_max_seq_len   = to_i(args,"--max_seq_len",32);
+    int top_k              = to_i(args,"--top_k",5);
+    float temperature      = to_f(args,"--temp",1.0f);
+    int eos_id             = to_i(args,"--eos_id",-1);
 
-    if(num_tokens <= 0) num_tokens = 1;
-    if(host_max_seq_len <= 1) host_max_seq_len = 2;
-    if(top_k < 1) top_k = 1;
-    if(temperature <= 0.f) temperature = 1.f;
+    // Run and ckpt
+    std::string run_name   = to_s(args,"--run-name","");
+    std::string ckpt_path, cfg_path, tok_path, tokens_path;
 
-    // Model shape — MUST match the checkpoint
-    int embed_dim       = to_i(args,"--dim",256);
-    int num_heads       = to_i(args,"--heads",4);
-    int ff_hidden_dim   = to_i(args,"--ff",1024);
-    int num_layers      = to_i(args,"--layers",4);
-    int model_max_seq   = to_i(args,"--model_seq_len",256); // model’s context length
-    // Tokenizer / vocab
+    int embed_dim=0,num_heads=0,ff_hidden_dim=0,num_layers=0,model_max_seq=0,vocab_size=0;
+
+    // --- Case 1: explicit ckpt given ---
+    if(args.count("--ckpt")){
+        ckpt_path = args["--ckpt"];
+        cfg_path = ckpt_path;
+        size_t pos = cfg_path.find_last_of('.');
+        if(pos != std::string::npos) cfg_path.replace(pos,4,"_config.json");
+
+        if(!fs::exists(cfg_path)){
+            std::cerr << "Error: config not found for checkpoint: " << cfg_path << "\n";
+            return 1;
+        }
+    }
+    // --- Case 2: run-name only ---
+    else if(!run_name.empty()){
+        cfg_path = "checkpoints/" + run_name + "/" + run_name + "_config.json";
+        if(!fs::exists(cfg_path)){
+            std::cerr << "Error: config not found at " << cfg_path << "\n";
+            return 1;
+        }
+    } else {
+        std::cerr << "Error: must supply either --ckpt or --run-name\n";
+        return 1;
+    }
+
+    // --- Load config ---
+    json config;
+    {
+        std::ifstream in(cfg_path);
+        if(!in){ std::cerr << "Error: cannot open config " << cfg_path << "\n"; return 1; }
+        in >> config;
+    }
+
+    vocab_size     = config["model"]["vocab_size"];
+    model_max_seq  = config["model"]["max_seq_len"];
+    embed_dim      = config["model"]["embed_dim"];
+    num_heads      = config["model"]["num_heads"];
+    ff_hidden_dim  = config["model"]["ff_hidden_dim"];
+    num_layers     = config["model"]["num_layers"];
+
+    tok_path       = config["tokenizer"]["path"];
+    tokens_path    = config["tokenizer"]["tokens_path"];
+
+    if(ckpt_path.empty()) ckpt_path = config["checkpoint"]["latest"];
+
+    // --- Tokenizer ---
     Tokenizer tokenizer;
     tokenizer.load(tok_path);
-    int vocab_size_tok  = tokenizer.vocab_size();
-    int vocab_size      = args.count("--vocab") ? to_i(args,"--vocab",vocab_size_tok) : vocab_size_tok;
+    int vocab_size_tok = tokenizer.vocab_size();
+    if(vocab_size==0) vocab_size = vocab_size_tok;
 
-    // Print the resolved config so mismatches are obvious
+    // Print resolved config
     std::cerr << "[generate] ckpt=" << ckpt_path
               << " dim=" << embed_dim
               << " heads=" << num_heads
@@ -104,11 +138,11 @@ int main(int argc, char** argv){
     std::cout << "Prompt: " << prompt << "\nGenerated: " << std::flush;
 
     {
-        // Construct model with the **same** hyperparameters used for training
+        // Model
         GPTModel model(vocab_size, model_max_seq, embed_dim, num_heads, ff_hidden_dim, num_layers);
-        model.load_checkpoint(ckpt_path); // will throw if shapes don’t match
+        model.load_checkpoint(ckpt_path);
 
-        // Encode and trim to leave room for at least one new token (on host side)
+        // Encode
         std::vector<int> input_ids = tokenizer.encode(prompt);
         if(input_ids.empty()){
             std::cerr << "\nError: prompt produced no tokens.\n";
@@ -116,7 +150,7 @@ int main(int argc, char** argv){
             goto after_model;
         }
 
-        // Trim to the smaller of host_max_seq_len and model_max_seq so we never exceed model context
+        // Trim to context
         int gen_window = std::min(host_max_seq_len, model_max_seq);
         if((int)input_ids.size() >= gen_window){
             input_ids.erase(
@@ -128,13 +162,11 @@ int main(int argc, char** argv){
         // Generate
         std::vector<int> generated_ids = model.generate(input_ids, num_tokens, top_k, temperature);
 
-        // Print only the newly generated tail
         size_t start = input_ids.size();
         for(size_t i = start; i < generated_ids.size(); ++i){
             if(eos_id >= 0 && generated_ids[i] == eos_id) break;
             std::string s = tokenizer.decode({generated_ids[i]});
             std::cout << s << std::flush;
-            if(stream && delay_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
         }
         std::cout << std::endl;
 

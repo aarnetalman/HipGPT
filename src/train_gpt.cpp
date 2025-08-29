@@ -13,6 +13,56 @@
 #include <algorithm>
 #include <string>
 #include <cmath>
+#include <chrono>
+#include <iomanip>
+#include <nlohmann/json.hpp>
+using json = nlohmann::json;
+
+
+std::string timestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << std::put_time(std::localtime(&t), "%Y%m%d_%H%M%S");
+    return ss.str();
+}
+
+void save_config(const std::string& path,
+                 int vocab_size, int max_seq_len, int embed_dim, int num_heads,
+                 int ff_hidden_dim, int num_layers,
+                 int batch_size, float learning_rate,
+                 const std::string& tokenizer_path,
+                 const std::string& tokens_path,
+                 const std::string& ckpt_path,
+                 int step) {
+    json config = {
+        {"model", {
+            {"vocab_size", vocab_size},
+            {"max_seq_len", max_seq_len},
+            {"embed_dim", embed_dim},
+            {"num_heads", num_heads},
+            {"ff_hidden_dim", ff_hidden_dim},
+            {"num_layers", num_layers}
+        }},
+        {"tokenizer", {
+            {"path", tokenizer_path},
+            {"tokens_path", tokens_path}
+        }},
+        {"training", {
+            {"batch_size", batch_size},
+            {"learning_rate", learning_rate},
+            {"steps", step}
+        }},
+        {"checkpoint", {
+            {"latest", ckpt_path},
+            {"step", step}
+        }}
+    };
+
+    std::ofstream cfg(path);
+    cfg << config.dump(4);
+}
+
 
 // keep only the newest `keep_last` step-checkpoints; don't touch gpt_checkpoint.bin
 void prune_old_checkpoints(const std::string& dir, const std::string& prefix, int keep_last) {
@@ -80,6 +130,12 @@ int main(int argc, char** argv) {
     int log_every = args.count("--log-every") ? std::stoi(args["--log-every"]) : 50;
     int ckpt_every = args.count("--ckpt-every") ? std::stoi(args["--ckpt-every"]) : 500;
     int keep_last  = args.count("--keep-last")  ? std::stoi(args["--keep-last"])  : 5;
+    std::string run_name = args.count("--run-name") ? args["--run-name"] : "run_" + std::to_string(time(nullptr));
+    std::string run_dir = "checkpoints/" + run_name;
+
+    // make sure directory exists
+    std::filesystem::create_directories(run_dir);
+
 
     if (keep_last < 1) keep_last = 1;
     if (ckpt_every < 0) ckpt_every = 0; // 0 disables periodic ckpt
@@ -126,6 +182,16 @@ int main(int argc, char** argv) {
     {
         // ---- Model ----
         GPTModel model(vocab_size, max_seq_len, embed_dim, num_heads, ff_hidden_dim, num_layers);
+        if (args.count("--ckpt")) {
+            std::string ckpt_path = args["--ckpt"];
+            if (std::filesystem::exists(ckpt_path)) {
+                std::cout << "Loading checkpoint from " << ckpt_path << " ..." << std::endl;
+                model.load_checkpoint(ckpt_path);
+                std::cout << "Checkpoint loaded successfully." << std::endl;
+            } else {
+                std::cerr << "Warning: checkpoint " << ckpt_path << " not found, starting fresh.\n";
+            }
+        }
 
         // Allocate inputs and outputs
         std::vector<int> h_input_ids(total_tokens_per_batch);
@@ -190,22 +256,38 @@ int main(int argc, char** argv) {
             }
 
             if (ckpt_every > 0 && step > 0 && (step % ckpt_every) == 0) {
-                std::stringstream fname;
-                fname << "gpt_checkpoint_step" << step << ".bin";
-                std::cout << "Saving checkpoint to " << fname.str() << " ..." << std::endl;
-                model.save_checkpoint(fname.str());
+                std::string ckpt_fname = run_dir + "/" + run_name + "_step" + std::to_string(step) + ".bin";
+                std::cout << "Saving checkpoint to " << ckpt_fname << " ..." << std::endl;
+                model.save_checkpoint(ckpt_fname);
+
+                save_config(run_dir + "/" + run_name + "_config.json",
+                    vocab_size, max_seq_len, embed_dim, num_heads,
+                    ff_hidden_dim, num_layers,
+                    batch_size, learning_rate,
+                    tokenizer_path, tokens_path,
+                    ckpt_fname, step);
                 std::cout << "Checkpoint saved." << std::endl;
 
-                // keep only newest N step-checkpoints
-                prune_old_checkpoints(".", "gpt_checkpoint", keep_last);
+                prune_old_checkpoints(run_dir, run_name, keep_last);
             }
+
         }
 
         hipEventDestroy(start);
         hipEventDestroy(stop);
 
-        std::cout << "Saving final checkpoint to gpt_checkpoint.bin ..." << std::endl;
-        model.save_checkpoint("gpt_checkpoint.bin");
+        std::string final_ckpt = run_dir + "/" + run_name + "_step" + std::to_string(num_steps) + ".bin";
+        std::cout << "Saving final checkpoint to " << final_ckpt << " ..." << std::endl;
+        model.save_checkpoint(final_ckpt);
+
+        std::string final_cfg = run_dir + "/" + run_name + "_step" + std::to_string(num_steps) + "_config.json";
+        save_config(final_cfg,
+            vocab_size, max_seq_len, embed_dim, num_heads,
+            ff_hidden_dim, num_layers,
+            batch_size, learning_rate,
+            tokenizer_path, tokens_path,
+            final_ckpt, num_steps);
+
         std::cout << "Checkpoint saved successfully." << std::endl;
 
         // Ensure all GPU work done before freeing raw buffers

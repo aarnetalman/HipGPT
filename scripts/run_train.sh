@@ -12,5 +12,13 @@ if [ ! -f "build/train_gpt" ]; then
     exit 1
 fi
 
+# Print usage info if no args provided
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 [training options]"
+    echo "Example: $0 --steps 10000 --batch 32 --seq 256 --dim 512 --heads 16 --ff 2048 --layers 8 --run-name tinyshakespeare"
+    echo ""
+    exit 1
+fi
+
 # Run training executable from the build directory
 ./build/train_gpt "$@"
