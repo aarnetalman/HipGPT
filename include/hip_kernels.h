@@ -35,7 +35,11 @@ void launch_add_inplace(float* a, const float* b, int n);
 void launch_mean_pool(const float* input, float* output, int B, int L, int D);
 
 // Multi-head attention and its building blocks
-void launch_multihead_attention(const float* d_qkv, float* d_output, int B, int S, int E, int H);
+void launch_multihead_attention(
+    const float* d_qkv,
+    float* d_output,
+    float* d_attn_probs,
+    int B, int S, int E, int H);
 void launch_scaled_dot_product(const float* Q, const float* K, float* scores, int B, int S, int D);
 void launch_softmax(const float* scores, float* softmax_out, int B, int S);
 void launch_attention_weighted_sum(const float* softmax, const float* V, float* output, int B, int S, int D);

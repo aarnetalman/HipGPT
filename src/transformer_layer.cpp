@@ -81,6 +81,8 @@ void TransformerLayer::deallocate_temp_buffers() {
     if (d_residual_input_) { hipFree(d_residual_input_); d_residual_input_ = nullptr; }
     if (d_grad_attn_output_) { hipFree(d_grad_attn_output_); d_grad_attn_output_ = nullptr; }
     if (d_grad_qkv_output_) { hipFree(d_grad_qkv_output_); d_grad_qkv_output_ = nullptr; }
+    if (d_attn_probs_) { hipFree(d_attn_probs_); d_attn_probs_ = nullptr; }
+
 }
 
 void TransformerLayer::allocate_weights() {
@@ -203,6 +205,8 @@ void TransformerLayer::allocate_temp_buffers(int batch_size, int seq_len) {
     hipMalloc(&d_residual_input_, total_tokens * embed_dim_ * sizeof(float));
     hipMalloc(&d_grad_attn_output_, total_tokens * embed_dim_ * sizeof(float));
     hipMalloc(&d_grad_qkv_output_, total_tokens * 3 * embed_dim_ * sizeof(float));
+    hipMalloc(&d_attn_probs_, (size_t)batch_size * num_heads_ * seq_len * seq_len * sizeof(float));
+
 
     total_tokens_ = total_tokens;
 }
@@ -211,8 +215,10 @@ void TransformerLayer::self_attention_forward(const float* d_input, float* d_out
     int total_tokens = batch_size * seq_len;
 
     launch_matmul_add_bias(d_input, d_qkv_weight_, d_qkv_bias_, d_qkv_output_, total_tokens, embed_dim_, 3 * embed_dim_);
-    launch_multihead_attention(d_qkv_output_, d_attn_output_, batch_size, seq_len, embed_dim_, num_heads_);
+    launch_multihead_attention(d_qkv_output_, d_attn_output_, d_attn_probs_,
+                           batch_size, seq_len, embed_dim_, num_heads_);
     launch_matmul_add_bias(d_attn_output_, d_o_weight_, d_o_bias_, d_output, total_tokens, embed_dim_, embed_dim_);
+    
 }
 
 void TransformerLayer::feed_forward_forward(const float* d_input, float* d_output, int batch_size, int seq_len) {
@@ -276,7 +282,8 @@ void TransformerLayer::backward(const float* d_input, const float* d_grad_output
     launch_matmul_backward_bias(d_attn_output_, d_attn_path_grad, d_o_grad_weight_, d_o_grad_bias_, total_tokens, embed_dim_, embed_dim_);
     launch_matmul_transpose_B(d_attn_path_grad, d_o_weight_, d_grad_attn_output_, total_tokens, embed_dim_, embed_dim_);
 
-    launch_multihead_attention_backward(d_grad_attn_output_, d_qkv_output_, nullptr, d_grad_qkv_output_, batch_size, seq_len, embed_dim_, num_heads_);
+    launch_multihead_attention_backward(d_grad_attn_output_, d_qkv_output_, d_attn_probs_,
+                                    d_grad_qkv_output_, batch_size, seq_len, embed_dim_, num_heads_);
 
     launch_matmul_transpose_A(d_residual_input_, d_grad_qkv_output_, d_qkv_grad_weight_, total_tokens, 3 * embed_dim_, embed_dim_);
     launch_matmul_transpose_B(d_grad_qkv_output_, d_qkv_weight_, d_qkv_grad_input_, total_tokens, 3 * embed_dim_, embed_dim_);

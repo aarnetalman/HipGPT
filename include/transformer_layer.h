@@ -79,6 +79,9 @@ private:
     float* d_residual_input_ = nullptr;
     float* d_attn_dropout_mask_ = nullptr;
     float* d_ffn_dropout_mask_ = nullptr;
+    // Attention probabilities (needed for backward)
+    float* d_attn_probs_ = nullptr;
+
     // Buffers for backward pass
     float* d_ff1_grad_output_ = nullptr;
     float* d_ff2_grad_input_  = nullptr;
