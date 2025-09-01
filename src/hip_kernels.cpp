@@ -423,10 +423,6 @@ void launch_multihead_attention(
         hipLaunchKernelGGL(multihead_attention_kernel_fallback, blocks, threads, S * sizeof(float), 0,
                         d_Q, d_K, d_V, d_output, d_attn_probs, B, S, E, H);
 
-        // Optional: zero out d_attn_probs to avoid stale values
-        if (d_attn_probs) {
-            hipMemset(d_attn_probs, 0, (size_t)B * H * S * S * sizeof(float));
-        }
     }
 }
 
