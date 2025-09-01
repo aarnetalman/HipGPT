@@ -257,14 +257,13 @@ void launch_relu(float* A, int size) {
     hipLaunchKernelGGL(relu_kernel, dim3(blocks), dim3(threads), 0, 0, A, size);
 }
 
-
 // ============================================================================
-// Flash Attention Implementation 
+// Flash Attention Implementation (safe version, no shared race on scores)
 // ============================================================================
 template<int HEAD_DIM>
 __global__ void flash_attention_kernel(
     const float* Q, const float* K, const float* V,
-    float* output, float* attn_probs,   // <— new
+    float* output, float* attn_probs,   // <— store probs for backward
     int B, int S, int E, int H
 ) {
     const int batch_idx = blockIdx.x;
@@ -273,25 +272,18 @@ __global__ void flash_attention_kernel(
     
     if (batch_idx >= B || head_idx >= H || query_idx >= S) return;
     
-    const float scale = rsqrtf((float)HEAD_DIM);
-    
-    // Shared memory for current block of K, V
-    extern __shared__ unsigned char smem_u8[];
-    float* s_K = reinterpret_cast<float*>(smem_u8);
-    float* s_V = s_K + HEAD_DIM * blockDim.y;
-
-    const int q_offset   = (batch_idx * S + query_idx) * E + head_idx * HEAD_DIM;
+    const float scale   = rsqrtf((float)HEAD_DIM);
+    const int q_offset  = (batch_idx * S + query_idx) * E + head_idx * HEAD_DIM;
     const int probs_base = (batch_idx * H + head_idx) * S * S + query_idx * S;
 
     float max_score = -1e30f;
     float sum_exp   = 0.0f;
-    float output_acc[64] = {0.0f}; // support up to HEAD_DIM=64
-    
-    // Temporary scores for all keys
-    extern __shared__ float scores_shared[]; // size S
-    float* scores = scores_shared;  
+    float output_acc[HEAD_DIM] = {0.0f};
 
-    // First pass: compute scores for all keys
+    // Local buffer (per-thread) for scores
+    float scores[512];  // assume S ≤ 512
+
+    // ---- Pass 1: compute raw scores ----
     for (int j = 0; j < S; ++j) {
         float score = 0.0f;
         const float* k_vec = K + (batch_idx * S + j) * E + head_idx * HEAD_DIM;
@@ -303,7 +295,7 @@ __global__ void flash_attention_kernel(
         max_score = fmaxf(max_score, score);
     }
 
-    // Compute exp and sum
+    // ---- Pass 2: softmax denominator ----
     for (int j = 0; j < S; ++j) {
         float prob = expf(scores[j] - max_score);
         scores[j]  = prob;
@@ -311,13 +303,13 @@ __global__ void flash_attention_kernel(
     }
     sum_exp = fmaxf(sum_exp, 1e-20f);
 
-    // Store normalized probs
+    // ---- Pass 3: store normalized probs ----
     float* out_probs = attn_probs + probs_base;
     for (int j = 0; j < S; ++j) {
         out_probs[j] = scores[j] / sum_exp;
     }
 
-    // Weighted sum for context
+    // ---- Pass 4: weighted sum for context ----
     for (int j = 0; j < S; ++j) {
         const float* v_vec = V + (batch_idx * S + j) * E + head_idx * HEAD_DIM;
         float p = out_probs[j];
@@ -326,80 +318,64 @@ __global__ void flash_attention_kernel(
         }
     }
 
-    // Write output
+    // ---- Write output ----
     for (int d = 0; d < HEAD_DIM; ++d) {
         output[q_offset + d] = output_acc[d];
     }
 }
 
 
-// Fallback kernel for unsupported head dimensions
+
 __global__ void multihead_attention_kernel_fallback(
     const float* Q, const float* K, const float* V,
-    float* output, float* attn_probs,  // <— added
+    float* output, float* attn_probs,
     int B, int S, int E, int H
 ) {
     int token_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int head_idx  = blockIdx.y;
-    
     if (token_idx >= B * S || head_idx >= H) return;
-    
-    int head_dim   = E / H;
+
+    int head_dim = E / H;
     const float scale = 1.0f / sqrtf((float)head_dim);
-    
     int batch_idx = token_idx / S;
     int query_idx = token_idx % S;
-    
+
     const float* q_vec = Q + token_idx * E + head_idx * head_dim;
     float* out_vec     = output + token_idx * E + head_idx * head_dim;
-    
-    // ---- Pass 1: compute max score for stability ----
+
+    // local arrays per thread (no race)
+    float scores[512];  // assumes S ≤ 512
     float max_score = -1e30f;
+
     for (int j = 0; j < S; ++j) {
         const float* k_vec = K + (batch_idx * S + j) * E + head_idx * head_dim;
-        float dot = 0.0f;
-        for (int d = 0; d < head_dim; ++d) {
-            dot += q_vec[d] * k_vec[d];
-        }
-        float score = dot * scale;
-        if (score > max_score) max_score = score;
+        float dot = 0.f;
+        for (int d = 0; d < head_dim; ++d) dot += q_vec[d] * k_vec[d];
+        scores[j] = dot * scale;
+        if (scores[j] > max_score) max_score = scores[j];
     }
-    
-    // ---- Pass 2: compute denominator and store raw scores ----
-    float sum_exp = 0.0f;
-    extern __shared__ float scores[]; // temporary storage (optional)
-    
+
+    float sum_exp = 0.f;
     for (int j = 0; j < S; ++j) {
-        const float* k_vec = K + (batch_idx * S + j) * E + head_idx * head_dim;
-        float dot = 0.0f;
-        for (int d = 0; d < head_dim; ++d) {
-            dot += q_vec[d] * k_vec[d];
-        }
-        float s = expf(dot * scale - max_score);
-        sum_exp += s;
-        
-        // Save raw score temporarily
-        scores[j] = s; // requires shared mem >= S floats
+        scores[j] = expf(scores[j] - max_score);
+        sum_exp += scores[j];
     }
     sum_exp = fmaxf(sum_exp, 1e-20f);
-    
-    // ---- Pass 3: compute softmax, save probs, and output ----
+
     for (int d = 0; d < head_dim; ++d) {
-        float weighted_sum = 0.0f;
+        float weighted_sum = 0.f;
         for (int j = 0; j < S; ++j) {
-            const float* v_vec = V + (batch_idx * S + j) * E + head_idx * head_dim;
             float prob = scores[j] / sum_exp;
-            
-            // Save probability
-            if (d == 0) { // only once per j
+            if (attn_probs && d == 0) {
                 attn_probs[((batch_idx * H + head_idx) * S + query_idx) * S + j] = prob;
             }
-            
+            const float* v_vec = V + (batch_idx * S + j) * E + head_idx * head_dim;
             weighted_sum += prob * v_vec[d];
         }
         out_vec[d] = weighted_sum;
     }
 }
+
 
 void launch_multihead_attention(
     const float* d_qkv,
@@ -1159,7 +1135,7 @@ void launch_matmul_transpose_B(const float* A, const float* B, float* C,
 }
 
 // ============================================================================
-// Multi-Head Attention Backward
+// Multi-Head Attention Backward (safe, no shared memory races)
 // ============================================================================
 __global__ void multihead_attention_backward_kernel(
     const float* grad_attn_out,
@@ -1176,21 +1152,21 @@ __global__ void multihead_attention_backward_kernel(
     int head_h  = blockIdx.y;
     if (token_i >= B * S || head_h >= H) return;
 
-    int head_dim = E / H;
+    int head_dim  = E / H;
     int batch_idx = token_i / S;
     int query_idx = token_i % S;
 
-    const float* q_vec  = q_in + token_i * E + head_h * head_dim;
-    const float* gho    = grad_attn_out + token_i * E + head_h * head_dim;
-    float* grad_q_vec   = grad_q_out + token_i * E + head_h * head_dim;
+    const float* q_vec = q_in + token_i * E + head_h * head_dim;
+    const float* gho   = grad_attn_out + token_i * E + head_h * head_dim;
+    float* grad_q_vec  = grad_q_out + token_i * E + head_h * head_dim;
 
     // Attention probs for this (b,h,i,:)
     const float* probs = attn_probs + (batch_idx * H + head_h) * S * S + query_idx * S;
 
-    extern __shared__ float shmem[];
-    float* dot_gho_v = shmem;  // length S
+    // Local buffer (no shared memory race). Assume S ≤ 512.
+    float dot_gho_v[512];
 
-    // Compute gho·V_j for all j
+    // Compute gho·V_j for all j and accumulate grad wrt V
     for (int j = 0; j < S; ++j) {
         const float* v_vec = v_in + (batch_idx * S + j) * E + head_h * head_dim;
         float val = 0.f;
@@ -1231,7 +1207,7 @@ __global__ void multihead_attention_backward_kernel(
 void launch_multihead_attention_backward(
     const float* d_grad_attn_output,
     const float* d_qkv,
-    const float* d_attn_probs,   // new
+    const float* d_attn_probs,
     float* d_grad_qkv,
     int B, int S, int E, int H
 ) {
@@ -1252,9 +1228,7 @@ void launch_multihead_attention_backward(
     dim3 blocks(blocks_x, H);
     dim3 threads(threads_per_block);
 
-    size_t shmem_size = S * sizeof(float);  // for dot_gho_v
-
-    hipLaunchKernelGGL(multihead_attention_backward_kernel, blocks, threads, shmem_size, 0,
+    hipLaunchKernelGGL(multihead_attention_backward_kernel, blocks, threads, 0, 0,
         d_grad_attn_output, d_Q, d_K, d_V, d_attn_probs,
         d_grad_Q, d_grad_K, d_grad_V, B, S, E, H);
 }
