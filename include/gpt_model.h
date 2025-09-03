@@ -66,4 +66,9 @@ private:
     // allocate/grow workspaces if needed
     void ensure_temp_capacity(int total_tokens);
 
+    // allocation helpers
+    void allocate_embeddings();
+    void allocate_output_projection();
+    void ensure_temp_capacity(int total_tokens);
+
 };
