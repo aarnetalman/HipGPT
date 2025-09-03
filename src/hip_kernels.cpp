@@ -327,55 +327,79 @@ __global__ void flash_attention_kernel(
 
 
 __global__ void multihead_attention_kernel_fallback(
-    const float* Q, const float* K, const float* V,
-    float* output, float* attn_probs,
+    const float* __restrict__ Q,
+    const float* __restrict__ K,
+    const float* __restrict__ V,
+    float* __restrict__ output,
+    float* __restrict__ attn_probs,   // [B,H,S,S] or nullptr
     int B, int S, int E, int H
 ) {
     int token_idx = blockIdx.x * blockDim.x + threadIdx.x;
     int head_idx  = blockIdx.y;
     if (token_idx >= B * S || head_idx >= H) return;
 
-    int head_dim = E / H;
-    const float scale = 1.0f / sqrtf((float)head_dim);
-    int batch_idx = token_idx / S;
-    int query_idx = token_idx % S;
+    const int head_dim   = E / H;
+    const float inv_sqrt = rsqrtf((float)head_dim);
+    const int batch_idx  = token_idx / S;
+    const int query_idx  = token_idx % S;
 
-    const float* q_vec = Q + token_idx * E + head_idx * head_dim;
-    float* out_vec     = output + token_idx * E + head_idx * head_dim;
+    const float* q_vec   = Q + token_idx * E + head_idx * head_dim;
+    float* out_vec       = output + token_idx * E + head_idx * head_dim;
 
-    // local arrays per thread (no race)
-    float scores[512];  // assumes S ≤ 512
+    // -----------------
+    // Pass 1: max score
+    // -----------------
     float max_score = -1e30f;
-
     for (int j = 0; j < S; ++j) {
         const float* k_vec = K + (batch_idx * S + j) * E + head_idx * head_dim;
         float dot = 0.f;
+        #pragma unroll 1
         for (int d = 0; d < head_dim; ++d) dot += q_vec[d] * k_vec[d];
-        scores[j] = dot * scale;
-        if (scores[j] > max_score) max_score = scores[j];
+        float s = dot * inv_sqrt;
+        if (s > max_score) max_score = s;
     }
 
+    // -----------------
+    // Pass 2: sum exp
+    // -----------------
     float sum_exp = 0.f;
     for (int j = 0; j < S; ++j) {
-        scores[j] = expf(scores[j] - max_score);
-        sum_exp += scores[j];
+        const float* k_vec = K + (batch_idx * S + j) * E + head_idx * head_dim;
+        float dot = 0.f;
+        #pragma unroll 1
+        for (int d = 0; d < head_dim; ++d) dot += q_vec[d] * k_vec[d];
+        sum_exp += __expf(dot * inv_sqrt - max_score);
     }
     sum_exp = fmaxf(sum_exp, 1e-20f);
+    const float inv_sum = 1.0f / sum_exp;
 
-    for (int d = 0; d < head_dim; ++d) {
-        float weighted_sum = 0.f;
-        for (int j = 0; j < S; ++j) {
-            float prob = scores[j] / sum_exp;
-            if (attn_probs && d == 0) {
-                attn_probs[((batch_idx * H + head_idx) * S + query_idx) * S + j] = prob;
-            }
-            const float* v_vec = V + (batch_idx * S + j) * E + head_idx * head_dim;
-            weighted_sum += prob * v_vec[d];
+    // ------------------------------
+    // Pass 3: probs + weighted value
+    // ------------------------------
+    for (int d = 0; d < head_dim; ++d) out_vec[d] = 0.f;
+
+    const bool write_probs = (attn_probs != nullptr);
+    float* probs_row = write_probs
+        ? (attn_probs + ((batch_idx * H + head_idx) * S + query_idx) * S)
+        : nullptr;
+
+    for (int j = 0; j < S; ++j) {
+        const float* k_vec = K + (batch_idx * S + j) * E + head_idx * head_dim;
+        const float* v_vec = V + (batch_idx * S + j) * E + head_idx * head_dim;
+
+        float dot = 0.f;
+        #pragma unroll 1
+        for (int d = 0; d < head_dim; ++d) dot += q_vec[d] * k_vec[d];
+
+        float p = __expf(dot * inv_sqrt - max_score) * inv_sum;
+        if (write_probs) probs_row[j] = p;
+
+        #pragma unroll 1
+        for (int d = 0; d < head_dim; ++d) {
+            out_vec[d] += p * v_vec[d];
         }
-        out_vec[d] = weighted_sum;
     }
 }
-
 
 void launch_multihead_attention(
     const float* d_qkv,
@@ -577,40 +601,39 @@ void launch_embedding_lookup(
 // ============================================================================
 // Softmax + Cross-Entropy Loss with Better Numerics
 // ============================================================================
+// --- in hip_kernels.cpp ---
+
 __global__ void softmax_loss_kernel(
     const float* logits,
-    float* softmax_out,
+    float* softmax_out,       // may be nullptr
     const int* labels,
     float* grad_out,
     float* loss_sum,
     int N, int V
-) {
+){
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
 
-    const float* logit_row = logits + idx * V;
-    float* softmax_row = softmax_out + idx * V;
-    float* grad_row = grad_out + idx * V;
+    const float* logit_row = logits + (size_t)idx * V;
+    float* softmax_row = softmax_out ? (softmax_out + (size_t)idx * V) : nullptr;
+    float* grad_row    = grad_out + (size_t)idx * V;
 
-    // Find max with better loop unrolling
+    // 1) max
     float max_logit = -1e30f;
-    for (int i = 0; i < V; ++i) {
-        max_logit = fmaxf(max_logit, logit_row[i]);
-    }
+    for (int i = 0; i < V; ++i) max_logit = fmaxf(max_logit, logit_row[i]);
 
-    // Compute exp and sum in single pass
+    // 2) exp & sum (write tmp into softmax_row if provided)
     float sum_exp = 0.0f;
     for (int i = 0; i < V; ++i) {
-        float exp_val = expf(logit_row[i] - max_logit);
-        softmax_row[i] = exp_val;
-        sum_exp += exp_val;
+        float e = expf(logit_row[i] - max_logit);
+        if (softmax_row) softmax_row[i] = e;
+        sum_exp += e;
     }
 
     int label = labels[idx];
     if (label < 0 || label >= V) {
-        // Invalid label case
         for (int i = 0; i < V; ++i) {
-            softmax_row[i] = 0.0f;
+            if (softmax_row) softmax_row[i] = 0.0f;
             grad_row[i] = 0.0f;
         }
         return;
@@ -618,45 +641,48 @@ __global__ void softmax_loss_kernel(
 
     sum_exp = fmaxf(sum_exp, 1e-20f);
     float inv_sum = 1.0f / sum_exp;
-    
-    // More numerically stable loss computation
     float log_prob = logit_row[label] - max_logit - logf(sum_exp);
     atomicAdd(loss_sum, -log_prob);
 
-    // Compute final probabilities and gradients
+    // 3) probs + grad
     for (int i = 0; i < V; ++i) {
-        float prob = softmax_row[i] * inv_sum;
-        softmax_row[i] = prob;
+        float prob = (softmax_row ? softmax_row[i] : expf(logit_row[i] - max_logit)) * inv_sum;
+        if (softmax_row) softmax_row[i] = prob;
         grad_row[i] = prob - (i == label ? 1.0f : 0.0f);
     }
 }
 
-float launch_softmax_loss(
-    const float* logits,
-    float* softmax_out,
-    const int* labels,
-    float* grad_out,
-    int B, int C
-) {
-    int N = B;
-    int V = C;
-
-    float* d_loss_sum;
-    hipMalloc(&d_loss_sum, sizeof(float));
-    hipMemset(d_loss_sum, 0, sizeof(float));
-
-    int threads = 256;
-    int blocks = (N + threads - 1) / threads;
-
+float launch_softmax_loss(const float* logits, float* softmax_out, const int* labels,
+                          float* grad_out, int N, int V) {
+    float* d_loss_sum; hipMalloc(&d_loss_sum, sizeof(float)); hipMemset(d_loss_sum, 0, sizeof(float));
+    int threads=256, blocks=(N + threads - 1) / threads;
     hipLaunchKernelGGL(softmax_loss_kernel, dim3(blocks), dim3(threads), 0, 0,
-        logits, softmax_out, labels, grad_out, d_loss_sum, N, V);
-
-    float loss;
-    hipMemcpy(&loss, d_loss_sum, sizeof(float), hipMemcpyDeviceToHost);
-    hipFree(d_loss_sum);
-
+                       logits, softmax_out, labels, grad_out, d_loss_sum, N, V);
+    float loss; hipMemcpy(&loss, d_loss_sum, sizeof(float), hipMemcpyDeviceToHost); hipFree(d_loss_sum);
     return loss / N;
 }
+
+// --- NEW: accuracy directly from logits (no softmax needed) ---
+__global__ void accuracy_from_logits_kernel(const float* logits,
+                                            const int* labels,
+                                            int* correct, int N, int V) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    const float* row = logits + (size_t)idx * V;
+    int argmax = 0; float maxv = row[0];
+    for (int i = 1; i < V; ++i) { float v = row[i]; if (v > maxv) { maxv=v; argmax=i; } }
+    if (labels[idx] == argmax) atomicAdd(correct, 1);
+}
+
+float launch_accuracy_from_logits(const float* d_logits, const int* d_labels, int N, int V) {
+    int threads=256, blocks=(N + threads - 1)/threads;
+    int* d_correct; hipMalloc(&d_correct, sizeof(int)); hipMemset(d_correct, 0, sizeof(int));
+    hipLaunchKernelGGL(accuracy_from_logits_kernel, dim3(blocks), dim3(threads), 0, 0,
+                       d_logits, d_labels, d_correct, N, V);
+    int h_correct=0; hipMemcpy(&h_correct, d_correct, sizeof(int), hipMemcpyDeviceToHost); hipFree(d_correct);
+    return (float)h_correct / N;
+}
+
 
 // ---------------- Accuracy ----------------
 __global__ void accuracy_kernel(const float* softmax, const int* labels, int* correct, int N, int V) {
@@ -1131,72 +1157,88 @@ void launch_matmul_transpose_B(const float* A, const float* B, float* C,
 }
 
 // ============================================================================
-// Multi-Head Attention Backward (safe, no shared memory races)
+// Multi-Head Attention Backward
 // ============================================================================
 __global__ void multihead_attention_backward_kernel(
-    const float* grad_attn_out,
-    const float* q_in,
-    const float* k_in,
-    const float* v_in,
-    const float* attn_probs,  // [B, H, S, S]
-    float* grad_q_out,
-    float* grad_k_out,
-    float* grad_v_out,
+    const float* __restrict__ grad_attn_out, // dL/dO   [B*S,E]
+    const float* __restrict__ q_in,          // Q       [B*S,E]
+    const float* __restrict__ k_in,          // K       [B*S,E]
+    const float* __restrict__ v_in,          // V       [B*S,E]
+    const float* __restrict__ attn_probs,    // P=[B,H,S,S]
+    float* __restrict__ grad_q_out,          // dL/dQ   [B*S,E]
+    float* __restrict__ grad_k_out,          // dL/dK   [B*S,E]
+    float* __restrict__ grad_v_out,          // dL/dV   [B*S,E]
     int B, int S, int E, int H
 ) {
-    int token_i = blockIdx.x * blockDim.x + threadIdx.x;
+    int token_i = blockIdx.x * blockDim.x + threadIdx.x; // i in [0, B*S)
     int head_h  = blockIdx.y;
     if (token_i >= B * S || head_h >= H) return;
 
-    int head_dim  = E / H;
-    int batch_idx = token_i / S;
-    int query_idx = token_i % S;
+    const int head_dim   = E / H;
+    const float inv_sqrt = rsqrtf((float)head_dim);
 
-    const float* q_vec = q_in + token_i * E + head_h * head_dim;
-    const float* gho   = grad_attn_out + token_i * E + head_h * head_dim;
-    float* grad_q_vec  = grad_q_out + token_i * E + head_h * head_dim;
+    const int batch_idx  = token_i / S;
+    const int query_idx  = token_i % S;
 
-    // Attention probs for this (b,h,i,:)
-    const float* probs = attn_probs + (batch_idx * H + head_h) * S * S + query_idx * S;
+    const float* q_vec   = q_in + token_i * E + head_h * head_dim;
+    const float* gho     = grad_attn_out + token_i * E + head_h * head_dim;
+    float* grad_q_vec    = grad_q_out + token_i * E + head_h * head_dim;
 
-    // Local buffer (no shared memory race). Assume S ≤ 512.
-    float dot_gho_v[512];
+    // Pointer to probs P_{i,:} for this (b,h,i)
+    const float* probs_row = attn_probs + ((batch_idx * H + head_h) * S + query_idx) * S;
 
-    // Compute gho·V_j for all j and accumulate grad wrt V
-    for (int j = 0; j < S; ++j) {
-        const float* v_vec = v_in + (batch_idx * S + j) * E + head_h * head_dim;
-        float val = 0.f;
-        for (int d = 0; d < head_dim; ++d) {
-            val += gho[d] * v_vec[d];
-        }
-        dot_gho_v[j] = val;
-
-        // Grad wrt V: ∂L/∂V_j = p_ij * gho
-        float* grad_v_vec = grad_v_out + (batch_idx * S + j) * E + head_h * head_dim;
-        for (int d = 0; d < head_dim; ++d) {
-            atomicAdd(&grad_v_vec[d], probs[j] * gho[d]);
-        }
-    }
-
-    // Compute weighted sum = Σ_j p_ij * (gho·V_j)
+    // ----------------------------------------
+    // Pass 1: weighted_sum = Σ_j p_ij * (gho·V_j)
+    // ----------------------------------------
     float weighted_sum = 0.f;
     for (int j = 0; j < S; ++j) {
-        weighted_sum += probs[j] * dot_gho_v[j];
+        const float* v_vec = v_in + (batch_idx * S + j) * E + head_h * head_dim;
+        float vdot = 0.f;
+        #pragma unroll 1
+        for (int d = 0; d < head_dim; ++d) vdot += gho[d] * v_vec[d];
+        weighted_sum += probs_row[j] * vdot;
     }
 
-    // Grad wrt Q and K
-    for (int d = 0; d < head_dim; ++d) {
-        float acc_qd = 0.f;
-        for (int j = 0; j < S; ++j) {
-            float grad_score = (dot_gho_v[j] - weighted_sum) * probs[j];
+    // ----------------------------------------
+    // Pass 2: grads for V, Q, K
+    // ----------------------------------------
+    // dL/dQ = Σ_j (p_ij * (gho·V_j - weighted_sum)) * (K_j / √d)
+    // dL/dK_j = (p_ij * (gho·V_j - weighted_sum)) * (Q / √d)
+    // dL/dV_j = p_ij * gho
+    for (int d = 0; d < head_dim; ++d) grad_q_vec[d] = 0.f;
 
-            const float* k_vec = k_in + (batch_idx * S + j) * E + head_h * head_dim;
-            acc_qd += grad_score * k_vec[d];
+    for (int j = 0; j < S; ++j) {
+        const float p_ij = probs_row[j];
 
-            atomicAdd(&grad_k_out[(batch_idx * S + j) * E + head_h * head_dim + d],
-                      grad_score * q_vec[d]);
+        const float* k_vec = k_in + (batch_idx * S + j) * E + head_h * head_dim;
+        const float* v_vec = v_in + (batch_idx * S + j) * E + head_h * head_dim;
+
+        // recompute (gho·V_j) (cheap vs. storing a full S-sized array)
+        float vdot = 0.f;
+        #pragma unroll 1
+        for (int d = 0; d < head_dim; ++d) vdot += gho[d] * v_vec[d];
+
+        const float grad_score = p_ij * (vdot - weighted_sum); // dL/ds_ij
+
+        // dL/dV_j += p_ij * gho
+        float* grad_v_j = grad_v_out + (batch_idx * S + j) * E + head_h * head_dim;
+        #pragma unroll 1
+        for (int d = 0; d < head_dim; ++d) {
+            atomicAdd(&grad_v_j[d], p_ij * gho[d]);
         }
-        grad_q_vec[d] = acc_qd;
+
+        // accumulate dL/dQ
+        #pragma unroll 1
+        for (int d = 0; d < head_dim; ++d) {
+            grad_q_vec[d] += grad_score * k_vec[d] * inv_sqrt;
+        }
+
+        // dL/dK_j += grad_score * Q / √d
+        float* grad_k_j = grad_k_out + (batch_idx * S + j) * E + head_h * head_dim;
+        #pragma unroll 1
+        for (int d = 0; d < head_dim; ++d) {
+            atomicAdd(&grad_k_j[d], grad_score * q_vec[d] * inv_sqrt);
+        }
     }
 }
 

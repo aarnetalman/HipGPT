@@ -17,6 +17,7 @@ void launch_backprop_activation(const float* act, const float* grad_out, float* 
 
 // Loss and Metrics
 float launch_softmax_loss(const float* logits, float* softmax_out, const int* labels, float* grad_out, int N, int V);
+float launch_accuracy_from_logits(const float* d_logits, const int* d_labels, int N, int V);
 float launch_accuracy(const float* d_softmax, const int* d_labels, int total_tokens, int vocab_size);
 
 // Embeddings

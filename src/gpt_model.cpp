@@ -37,6 +37,7 @@ GPTModel::~GPTModel() {
     if (d_output_v_) hipFree(d_output_v_);
     if (d_embedded_input_) hipFree(d_embedded_input_);
     if (d_layer_output_)   hipFree(d_layer_output_);
+    if (d_last_grad_)      hipFree(d_last_grad_); 
 
     for (auto* layer : layers_) {
         delete layer;
@@ -67,45 +68,43 @@ void GPTModel::allocate_embeddings() {
     hipMemset(d_pos_v_, 0, pos_embed_size * sizeof(float));
 }
 
-void GPTModel::allocate_output_projection() {
-    int proj_size = embed_dim_ * vocab_size_;
-    std::vector<float> proj_host(proj_size);
-    for (auto& w : proj_host) w = ((float)rand() / RAND_MAX - 0.5f) * 0.02f;
+void GPTModel::ensure_temp_capacity(int T) {
+    if (T <= temp_tokens_cap_) return;
+    int new_cap = std::max(T, temp_tokens_cap_ + temp_tokens_cap_/2 + 1); // 1.5x growth
 
-    hipMalloc(&d_output_proj_, proj_size * sizeof(float));
-    hipMalloc(&d_output_proj_grad_, proj_size * sizeof(float));
-    hipMalloc(&d_output_m_, proj_size * sizeof(float));
-    hipMalloc(&d_output_v_, proj_size * sizeof(float));
+    // Free old (if any)
+    if (d_embedded_input_) hipFree(d_embedded_input_);
+    if (d_layer_output_)   hipFree(d_layer_output_);
+    if (d_last_grad_)      hipFree(d_last_grad_);
 
-    hipMemcpy(d_output_proj_, proj_host.data(), proj_size * sizeof(float), hipMemcpyHostToDevice);
-    hipMemset(d_output_proj_grad_, 0, proj_size * sizeof(float));
-    hipMemset(d_output_m_, 0, proj_size * sizeof(float));
-    hipMemset(d_output_v_, 0, proj_size * sizeof(float));
+    const size_t bytes = (size_t)new_cap * (size_t)embed_dim_ * sizeof(float);
+    hipMalloc(&d_embedded_input_, bytes);
+    hipMalloc(&d_layer_output_,   bytes);
+    hipMalloc(&d_last_grad_,      bytes);
+    temp_tokens_cap_ = new_cap;
 }
 
-void GPTModel::forward(const int* d_input_ids, float* d_logits, int batch_size, int seq_len) {
-    int total_tokens = batch_size * seq_len;
-    float* d_embed_out;
-    hipMalloc(&d_embed_out, total_tokens * embed_dim_ * sizeof(float));
+void GPTModel::forward(const int* d_input_ids, float* d_logits,
+                       int batch_size, int seq_len)
+{
+    const int T = batch_size * seq_len;
+    ensure_temp_capacity(T);
 
-    launch_embedding_lookup(
-        d_input_ids, d_token_embedding_, d_pos_embedding_, d_embed_out,
-        batch_size, seq_len, vocab_size_, embed_dim_
-    );
+    float* x   = d_embedded_input_; // current activations
+    float* tmp = d_layer_output_;   // scratch ping-pong
 
-    float* d_temp;
-    hipMalloc(&d_temp, total_tokens * embed_dim_ * sizeof(float));
-    float* d_input = d_embed_out;
+    // embeddings → x
+    launch_embedding_lookup(d_input_ids, d_token_embedding_, d_pos_embedding_,
+                            x, batch_size, seq_len, vocab_size_, embed_dim_);
 
+    // transformer stack (ping-pong x <-> tmp)
     for (int i = 0; i < num_layers_; ++i) {
-        layers_[i]->forward(d_input, d_temp, batch_size, seq_len);
-        std::swap(d_input, d_temp);
+        layers_[i]->forward(x, tmp, batch_size, seq_len);  // writes tmp
+        std::swap(x, tmp);
     }
 
-    launch_matmul(d_input, d_output_proj_, d_logits, total_tokens, embed_dim_, vocab_size_);
-
-    hipFree(d_embed_out);
-    hipFree(d_temp);
+    // output projection: [T,E] x [E,V] -> [T,V]
+    launch_matmul(x, d_output_proj_, d_logits, T, embed_dim_, vocab_size_);
 }
 
 void GPTModel::backward(const int* d_input_ids,
@@ -113,68 +112,66 @@ void GPTModel::backward(const int* d_input_ids,
                         int batch_size, int seq_len,
                         float learning_rate, int adam_t)
 {
-    const int total_tokens = batch_size * seq_len;
-    const float max_grad_norm = 1.0f;             // <-- tune as you like (0.5–1.0 common)
+    const int T = batch_size * seq_len;
+    const float max_grad_norm = 1.0f;
 
-    // ---- 1) Recompute forward intermediates (as you had) -------------------
-    float* d_embed_out = nullptr;
-    hipMalloc(&d_embed_out, total_tokens * embed_dim_ * sizeof(float));
+    // --- grow-once workspaces: [T,E] ---
+    ensure_temp_capacity(T);
+    float* d_embed_out = d_embedded_input_; // forward activations
+    float* d_temp      = d_layer_output_;   // scratch ping-pong
+    float* d_last_grad = d_last_grad_;      // grad wrt last hidden
 
+    // ===== 1) Recompute forward activations (cheap vs storing all layers) =====
     launch_embedding_lookup(
         d_input_ids, d_token_embedding_, d_pos_embedding_, d_embed_out,
         batch_size, seq_len, vocab_size_, embed_dim_
     );
 
+    // Cache per-layer inputs (device pointers) for LN/residual in layer backward
     std::vector<const float*> layer_inputs;
     layer_inputs.reserve(num_layers_ + 1);
     layer_inputs.push_back(d_embed_out);
 
-    float* d_temp = nullptr;
-    hipMalloc(&d_temp, total_tokens * embed_dim_ * sizeof(float));
-
-    float* d_input = d_embed_out;
+    float* d_in  = d_embed_out;
+    float* d_out = d_temp;
     for (int i = 0; i < num_layers_; ++i) {
-        layers_[i]->forward(d_input, d_temp, batch_size, seq_len);
-        std::swap(d_input, d_temp);
-        layer_inputs.push_back(d_input); // cache post-layer activations
+        layers_[i]->forward(d_in, d_out, batch_size, seq_len);
+        std::swap(d_in, d_out);
+        layer_inputs.push_back(d_in); // post-layer activation
     }
 
-    // ---- 2) Grad wrt last hidden (from logits) -----------------------------
-    float* d_last_grad = nullptr;
-    hipMalloc(&d_last_grad, total_tokens * embed_dim_ * sizeof(float));
-
-    // d(last_hidden) = d_logits_grad @ W_out^T
+    // ===== 2) Grad wrt last hidden from logits grad: dH = dY * W^T =====
     launch_matmul_transpose_B(
         d_logits_grad, d_output_proj_, d_last_grad,
-        total_tokens, vocab_size_, embed_dim_
+        T, /*N=*/vocab_size_, /*K=*/embed_dim_
     );
 
-    // ---- 3) Grad for output projection -------------------------------------
-    // W_out_grad = (last_hidden)^T @ d_logits_grad
+    // ===== 3) Output projection grads: dW = H^T * dY =====
     launch_matmul_transpose_A(
         layer_inputs.back(), d_logits_grad, d_output_proj_grad_,
-        total_tokens, /*N=*/vocab_size_, /*K=*/embed_dim_
+        T, /*N=*/vocab_size_, /*K=*/embed_dim_
     );
 
-    // ---- 4) Backprop through transformer stack (NO updates here) -----------
+    // ===== 4) Backprop through transformer stack (now with REAL lr) =====
+    // NOTE: this applies Adam updates INSIDE each layer (no global clip yet)
     for (int i = num_layers_ - 1; i >= 0; --i) {
         layers_[i]->backward(
-            layer_inputs[i],      // x_in to layer i
-            d_last_grad,          // grad wrt layer_i output (in)
-            d_last_grad,          // grad wrt layer_i input  (out, reuse buffer)
+            layer_inputs[i],       // input to layer i
+            d_last_grad,           // grad wrt layer i output (in/out buffer OK)
+            d_last_grad,           // grad wrt layer i input  (reuse buffer)
             batch_size, seq_len,
-            /*learning_rate=*/0.0f,
+            /*learning_rate=*/learning_rate, // <-- CRITICAL: not 0.0f
             adam_t
         );
     }
 
-    // ---- 5) Embedding grads -------------------------------------------------
+    // ===== 5) Embedding grads from d_last_grad =====
     float* d_grad_token_embedding = nullptr;
     float* d_grad_pos_embedding   = nullptr;
-    hipMalloc(&d_grad_token_embedding, vocab_size_ * embed_dim_ * sizeof(float));
-    hipMalloc(&d_grad_pos_embedding,   max_seq_len_ * embed_dim_ * sizeof(float));
-    hipMemset(d_grad_token_embedding, 0, vocab_size_ * embed_dim_ * sizeof(float));
-    hipMemset(d_grad_pos_embedding,   0, max_seq_len_ * embed_dim_ * sizeof(float));
+    hipMalloc(&d_grad_token_embedding, (size_t)vocab_size_ * embed_dim_ * sizeof(float));
+    hipMalloc(&d_grad_pos_embedding,   (size_t)max_seq_len_ * embed_dim_ * sizeof(float));
+    hipMemset(d_grad_token_embedding, 0, (size_t)vocab_size_ * embed_dim_ * sizeof(float));
+    hipMemset(d_grad_pos_embedding,   0, (size_t)max_seq_len_ * embed_dim_ * sizeof(float));
 
     launch_embedding_backward(
         d_last_grad, d_input_ids,
@@ -182,56 +179,46 @@ void GPTModel::backward(const int* d_input_ids,
         batch_size, seq_len, embed_dim_, vocab_size_
     );
 
-    // ---- 6) Gradient clipping (device-side) --------------------------------
+    // ===== 6) Global grad clipping (CURRENTLY: only for out-proj + embeddings) =====
     std::vector<float*> grad_ptrs;
     std::vector<int>    grad_sizes;
 
-    // Output projection grad
     grad_ptrs.push_back(d_output_proj_grad_);
     grad_sizes.push_back(embed_dim_ * vocab_size_);
 
-    // Embedding grads
     grad_ptrs.push_back(d_grad_token_embedding);
     grad_sizes.push_back(vocab_size_ * embed_dim_);
 
     grad_ptrs.push_back(d_grad_pos_embedding);
     grad_sizes.push_back(max_seq_len_ * embed_dim_);
 
-    // Accumulate L2 norm^2 on device
     float* d_total_norm_sq = nullptr;
     hipMalloc(&d_total_norm_sq, sizeof(float));
     hipMemset(d_total_norm_sq, 0, sizeof(float));
-
-    for (size_t i = 0; i < grad_ptrs.size(); ++i) {
+    for (size_t i = 0; i < grad_ptrs.size(); ++i)
         launch_l2_accumulate(grad_ptrs[i], grad_sizes[i], d_total_norm_sq);
-    }
 
     float h_total_norm_sq = 0.0f;
     hipMemcpy(&h_total_norm_sq, d_total_norm_sq, sizeof(float), hipMemcpyDeviceToHost);
     hipFree(d_total_norm_sq);
-
     float h_total_norm = std::sqrt(std::max(h_total_norm_sq, 0.0f));
+
     float clip_scale = 1.0f;
-    if (h_total_norm > 0.0f && h_total_norm > max_grad_norm) {
+    if (h_total_norm > 0.0f && h_total_norm > max_grad_norm)
         clip_scale = max_grad_norm / h_total_norm;
-    }
 
     if (clip_scale < 1.0f) {
-        for (size_t i = 0; i < grad_ptrs.size(); ++i) {
+        for (size_t i = 0; i < grad_ptrs.size(); ++i)
             launch_scale_inplace(grad_ptrs[i], grad_sizes[i], clip_scale);
-        }
+        // (TransformerLayer params are NOT clipped here—see next section)
     }
 
-    // ---- 7) Optimizer steps AFTER clipping ---------------------------------
-
-    // Output projection
+    // ===== 7) Adam updates for OUT PROJ + EMBEDDINGS =====
     launch_adam_update(
         d_output_proj_, d_output_proj_grad_, d_output_m_, d_output_v_,
         learning_rate, 0.9f, 0.999f, 1e-8f, adam_t,
         embed_dim_ * vocab_size_
     );
-
-    // Embeddings
     launch_adam_update(
         d_token_embedding_, d_grad_token_embedding, d_token_m_, d_token_v_,
         learning_rate, 0.9f, 0.999f, 1e-8f, adam_t,
@@ -243,14 +230,10 @@ void GPTModel::backward(const int* d_input_ids,
         max_seq_len_ * embed_dim_
     );
 
-    // ---- 8) Cleanup ---------------------------------------------------------
-    hipFree(d_embed_out);
-    hipFree(d_temp);
-    hipFree(d_last_grad);
+    // ===== 8) cleanup small, per-step buffers =====
     hipFree(d_grad_token_embedding);
     hipFree(d_grad_pos_embedding);
 }
-
 
 std::vector<int> GPTModel::generate(const std::vector<int>& prompt_ids,
                                     int max_new_tokens,
