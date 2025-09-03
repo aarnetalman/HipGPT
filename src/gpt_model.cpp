@@ -14,6 +14,16 @@
 #include <numeric>
 
 
+#ifndef HIP_CHECK
+#define HIP_CHECK(cmd) do { \
+  hipError_t _e = (cmd); \
+  if (_e != hipSuccess) { \
+    throw std::runtime_error(std::string(#cmd) + " failed: " + hipGetErrorString(_e)); \
+  } \
+} while (0)
+#endif
+
+
 GPTModel::GPTModel(int vocab_size, int max_seq_len, int embed_dim, int num_heads, int ff_hidden_dim, int num_layers)
     : vocab_size_(vocab_size), max_seq_len_(max_seq_len), embed_dim_(embed_dim), num_layers_(num_layers) {
 
@@ -407,4 +417,29 @@ void GPTModel::load_checkpoint(const std::string& path) {
         is.read(reinterpret_cast<char*>(h_proj.data()), h_proj.size() * sizeof(float));
         hipMemcpy(d_output_proj_, h_proj.data(), h_proj.size() * sizeof(float), hipMemcpyHostToDevice);
     }
+}
+
+void GPTModel::allocate_output_projection() {
+    // Weight is [E, V] laid out row-major (E rows, V cols)
+    const size_t W = static_cast<size_t>(embed_dim_) * static_cast<size_t>(vocab_size_);
+
+    // Xavier-ish small random init like embeddings
+    std::vector<float> h_w(W);
+    for (auto &w : h_w) {
+        w = (static_cast<float>(rand()) / RAND_MAX - 0.5f) * 0.02f;
+    }
+
+    // Parameters
+    HIP_CHECK(hipMalloc(&d_output_proj_,      W * sizeof(float)));
+    HIP_CHECK(hipMemcpy(d_output_proj_, h_w.data(), W * sizeof(float), hipMemcpyHostToDevice));
+
+    // Gradient buffer
+    HIP_CHECK(hipMalloc(&d_output_proj_grad_, W * sizeof(float)));
+    HIP_CHECK(hipMemset(d_output_proj_grad_, 0,  W * sizeof(float)));
+
+    // Adam buffers
+    HIP_CHECK(hipMalloc(&d_output_m_, W * sizeof(float)));
+    HIP_CHECK(hipMalloc(&d_output_v_, W * sizeof(float)));
+    HIP_CHECK(hipMemset(d_output_m_, 0, W * sizeof(float)));
+    HIP_CHECK(hipMemset(d_output_v_, 0, W * sizeof(float)));
 }
